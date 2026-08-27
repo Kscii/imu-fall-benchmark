@@ -452,8 +452,9 @@ def validate_data(
     external_collection = collections["external"]
     if not isinstance(training_collection, dict) or not isinstance(external_collection, dict):
         raise ValueError("Invalid snapshot collection shape")
+    training_ids = tuple(str(item["dataset_id"]) for item in training_collection["datasets"])
     training_totals, training_participants, training_datasets = _validate_collection(
-        project_root, training_collection, TRAINING_DATASET_IDS
+        project_root, training_collection, training_ids
     )
     training_split = training_collection["split"]
     if not isinstance(training_split, dict):
@@ -463,14 +464,16 @@ def validate_data(
         training_participants,
         split_version=str(training_split["version"]),
     )
+    external_ids = tuple(str(item["dataset_id"]) for item in external_collection["datasets"])
     external_totals, external_participants, external_datasets = _validate_collection(
-        project_root, external_collection, EXTERNAL_DATASET_IDS
+        project_root, external_collection, external_ids
     )
-    kfall = external_datasets[0]
-    if kfall["supervision"] != {"temporal": 5075}:
-        raise ValueError("KFall must contain 5,075 temporal sequences")
-    if kfall["body_locations"] != {"lower_back": 5075}:
-        raise ValueError("KFall must contain lower_back sequences only")
+    kfall = next((item for item in external_datasets if item["dataset_id"] == "kfall"), None)
+    if kfall is not None:
+        if kfall["supervision"] != {"temporal": 5075}:
+            raise ValueError("KFall must contain 5,075 temporal sequences")
+        if kfall["body_locations"] != {"lower_back": 5075}:
+            raise ValueError("KFall must contain lower_back sequences only")
     external_split_manifest = external_collection["split"]
     if not isinstance(external_split_manifest, dict):
         raise ValueError("Invalid external split manifest")

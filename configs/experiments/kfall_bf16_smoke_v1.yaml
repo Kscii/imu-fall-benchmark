@@ -1,0 +1,25 @@
+schema_version: 1
+id: kfall_bf16_smoke_v1
+contract_path: configs/contracts/imu_benchmark_contract_v1.json
+snapshot_path: data/snapshot_v1.json
+data_view_path: configs/data_views/kfall_temporal_v1.yaml
+model_catalog_path: configs/models/fall_models_v1.yaml
+models:
+  - torch_1d_cnn
+  - torch_lstm
+  - torch_cnn_lstm
+folds: [0]
+seeds: [3888]
+precision: bf16
+gpu_mode: auto
+runtime_budget_seconds: 900
+max_epochs: 2
+patience: 1
+max_sequences_per_split: 600
+max_windows_per_sequence: 48
+cache_flush_windows: 16384
+data_quality_status: provisional_precision_comparison
+known_limitations:
+  - BF16 is applied only to PyTorch forward and loss computation; source values and normalisation remain FP32.
+  - Compare this run only with the matching FP32 fold, seed, data view, and model configuration.
+  - KFall adapter timing limitations still apply.

@@ -1,0 +1,63 @@
+schema_version: 1
+models:
+  threshold_impact:
+    backend: rule
+    input_kind: raw
+    standardize: false
+    params:
+      gravity_mps2: 9.80665
+      gyro_scale_rad_s: 6.283185307179586
+  cuml_logistic_regression:
+    backend: cuml
+    input_kind: features
+    standardize: true
+    params:
+      C: 1.0
+      penalty: l2
+      max_iter: 50
+  cuml_random_forest:
+    backend: cuml
+    input_kind: features
+    standardize: false
+    params:
+      n_estimators: 200
+      max_depth: 24
+      min_samples_leaf: 1
+      max_features: sqrt
+      n_bins: 128
+      n_streams: 4
+      bootstrap: true
+  xgboost_cuda:
+    backend: xgboost
+    input_kind: features
+    standardize: false
+    params:
+      n_estimators: 200
+      max_depth: 6
+      learning_rate: 0.1
+      min_child_weight: 1.0
+      subsample: 0.8
+      colsample_bytree: 0.8
+      reg_lambda: 1.0
+  torch_1d_cnn:
+    backend: pytorch
+    input_kind: raw
+    standardize: true
+    params: &sequence_params
+      channels: 64
+      hidden_size: 64
+      dropout: 0.2
+      learning_rate: 0.001
+      weight_decay: 0.0001
+      batch_size: 256
+      bag_batch_size: 32
+  torch_lstm:
+    backend: pytorch
+    input_kind: raw
+    standardize: true
+    params: *sequence_params
+  torch_cnn_lstm:
+    backend: pytorch
+    input_kind: raw
+    standardize: true
+    params: *sequence_params

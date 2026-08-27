@@ -1,0 +1,483 @@
+from __future__ import annotations
+
+import csv
+import json
+import os
+import time
+from collections.abc import Iterator
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import h5py
+import numpy as np
+
+from .configuration import canonical_sha256
+from .data import FEATURE_NAMES, extract_window_features
+from .dataset import IMURecording, iter_recordings
+from .performance import PhaseTimer
+from .protocol import segment_decision_time_labels
+
+WINDOW_CACHE_SCHEMA = "unified_fall_windows_v3"
+
+
+def _text_array(dataset: h5py.Dataset) -> np.ndarray:
+    return np.asarray(
+        [value.decode() if isinstance(value, bytes) else str(value) for value in dataset]
+    )
+
+
+def _split_assignments(project_root: Path, snapshot: dict[str, Any]) -> dict[tuple[str, str], int]:
+    result: dict[tuple[str, str], int] = {}
+    for collection in snapshot["collections"].values():
+        split = collection["split"]
+        path = project_root / split["path"]
+        with path.open(encoding="utf-8-sig", newline="") as source:
+            for row in csv.DictReader(source):
+                if row["split_version"] != split["version"]:
+                    raise ValueError(f"Unexpected split version in {path}")
+                key = (row["dataset_id"], row["participant_id"])
+                if key in result:
+                    raise ValueError(f"Duplicate participant split: {key}")
+                result[key] = int(row["fold_id"])
+    return result
+
+
+def _recording_collections(
+    project_root: Path, snapshot: dict[str, Any]
+) -> Iterator[tuple[IMURecording, int]]:
+    assignments = _split_assignments(project_root, snapshot)
+    for collection in snapshot["collections"].values():
+        dataset_ids = tuple(item["dataset_id"] for item in collection["datasets"])
+        for recording in iter_recordings(
+            project_root / collection["data_path"], expected_dataset_ids=dataset_ids
+        ):
+            key = (recording.dataset_id, recording.participant_id)
+            if key not in assignments:
+                raise ValueError(f"Missing participant fold for {key}")
+            yield recording, assignments[key]
+
+
+def _windows(values: np.ndarray, length: int, stride: int) -> tuple[np.ndarray, np.ndarray]:
+    starts = np.arange(0, len(values) - length + 1, stride, dtype=np.int32)
+    if not len(starts):
+        return np.empty((0, length, 6), dtype=np.float32), starts
+    windows = np.stack([values[start : start + length] for start in starts])
+    return windows.astype(np.float32, copy=False), starts
+
+
+def _resize_write(dataset: h5py.Dataset, values: np.ndarray) -> None:
+    start = len(dataset)
+    stop = start + len(values)
+    dataset.resize((stop, *dataset.shape[1:]))
+    dataset[start:stop] = values
+
+
+class _WindowBuffer:
+    def __init__(self, datasets: dict[str, h5py.Dataset], flush_windows: int) -> None:
+        self.datasets = datasets
+        self.flush_windows = flush_windows
+        self.parts: dict[str, list[np.ndarray]] = {name: [] for name in datasets}
+        self.size = 0
+
+    def append(self, values: dict[str, np.ndarray]) -> None:
+        if set(values) != set(self.datasets):
+            raise ValueError("Window-cache buffer fields do not match the schema")
+        count = len(next(iter(values.values())))
+        if any(len(value) != count for value in values.values()):
+            raise ValueError("Window-cache buffer columns have different lengths")
+        for name, value in values.items():
+            self.parts[name].append(value)
+        self.size += count
+        if self.size >= self.flush_windows:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self.size:
+            return
+        for name, dataset in self.datasets.items():
+            _resize_write(dataset, np.concatenate(self.parts[name], axis=0))
+            self.parts[name].clear()
+        self.size = 0
+
+
+def _cache_fingerprint(config: dict[str, Any]) -> str:
+    payload = {
+        "schema": WINDOW_CACHE_SCHEMA,
+        "contract_sha256": config["contract_sha256"],
+        "snapshot_sha256": config["snapshot_sha256"],
+        "window_samples": config["contract"]["window"]["samples"],
+        "stride_samples": config["contract"]["window"]["stride_samples"],
+        "feature_names": FEATURE_NAMES,
+        "flush_windows": config["cache_flush_windows"],
+    }
+    return canonical_sha256(payload)
+
+
+def prepare_unified_window_store(
+    *, project_root: Path, cache_root: Path, config: dict[str, Any]
+) -> tuple[Path, dict[str, Any]]:
+    fingerprint = _cache_fingerprint(config)
+    destination = cache_root / "windows" / WINDOW_CACHE_SCHEMA / f"{fingerprint[:16]}.h5"
+    if destination.exists():
+        with h5py.File(destination, "r") as handle:
+            manifest = json.loads(str(handle.attrs["manifest_json"]))
+        if manifest.get("data_split_fingerprint") != fingerprint:
+            raise ValueError(f"Conflicting unified cache: {destination}")
+        return destination, {**manifest, "cache_reused_this_invocation": True}
+
+    window_samples = int(config["contract"]["window"]["samples"])
+    stride_samples = int(config["contract"]["window"]["stride_samples"])
+    sampling_rate_hz = float(config["contract"]["canonical_signal"]["sampling_rate_hz"])
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(f".h5.tmp-{os.getpid()}")
+    started = time.perf_counter()
+    phases = PhaseTimer()
+    skipped_short = 0
+    skipped_post_segment_overlap = 0
+    skipped_exclusion = 0
+    event_count = 0
+    events_without_positive_window = 0
+    sequence_count = 0
+    window_count = 0
+    positive_temporal = 0
+    negative_temporal = 0
+    dataset_windows: dict[str, int] = {}
+    dataset_sequences: dict[str, int] = {}
+    dataset_positive_temporal: dict[str, int] = {}
+    dataset_negative_temporal: dict[str, int] = {}
+    dataset_events: dict[str, int] = {}
+    dataset_events_without_positive: dict[str, int] = {}
+    dataset_skipped_post_segment: dict[str, int] = {}
+    text_dtype = h5py.string_dtype(encoding="utf-8")
+    try:
+        with h5py.File(temporary, "w", libver=("earliest", "v114")) as handle:
+            handle.attrs.update(
+                {
+                    "window_schema_version": WINDOW_CACHE_SCHEMA,
+                    "feature_schema_version": config["contract"]["window"][
+                        "feature_schema_version"
+                    ],
+                    "data_split_fingerprint": fingerprint,
+                    "contract_sha256": config["contract_sha256"],
+                    "snapshot_sha256": config["snapshot_sha256"],
+                    "sampling_rate_hz": sampling_rate_hz,
+                    "window_samples": window_samples,
+                    "stride_samples": stride_samples,
+                    "feature_names": json.dumps(FEATURE_NAMES),
+                    "hdf5_compatibility": "1.14",
+                }
+            )
+            sequences = handle.create_group("sequences")
+            text_fields = (
+                "dataset_id",
+                "participant_id",
+                "recording_id",
+                "body_location",
+                "activity",
+                "supervision_kind",
+            )
+            for name in text_fields:
+                sequences.create_dataset(
+                    name, shape=(0,), maxshape=(None,), dtype=text_dtype, chunks=True
+                )
+            for name, dtype in (
+                ("is_fall", "?"),
+                ("fold_id", "i1"),
+                ("event_onset_sample", "i8"),
+                ("event_impact_sample", "i8"),
+                ("event_stop_sample", "i8"),
+            ):
+                sequences.create_dataset(
+                    name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=True
+                )
+
+            windows_group = handle.create_group("windows")
+            window_datasets = {
+                "raw": windows_group.create_dataset(
+                    "raw",
+                    shape=(0, window_samples, 6),
+                    maxshape=(None, window_samples, 6),
+                    dtype="f4",
+                    chunks=(1024, window_samples, 6),
+                    compression="lzf",
+                    shuffle=True,
+                ),
+                "features": windows_group.create_dataset(
+                    "features",
+                    shape=(0, len(FEATURE_NAMES)),
+                    maxshape=(None, len(FEATURE_NAMES)),
+                    dtype="f4",
+                    chunks=(2048, len(FEATURE_NAMES)),
+                    compression="lzf",
+                    shuffle=True,
+                ),
+            }
+            for name, dtype in (
+                ("sequence_index", "i4"),
+                ("start_sample", "i4"),
+                ("end_sample", "i4"),
+                ("fold_id", "i1"),
+                ("bag_label", "i1"),
+                ("temporal_label", "i1"),
+            ):
+                window_datasets[name] = windows_group.create_dataset(
+                    name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=True
+                )
+            buffer = _WindowBuffer(window_datasets, int(config["cache_flush_windows"]))
+
+            recordings = phases.iterate(
+                "source_hdf5_read_seconds",
+                _recording_collections(project_root, config["snapshot"]),
+            )
+            for recording, fold in recordings:
+                with phases.track("window_generation_seconds"):
+                    raw, starts = _windows(recording.values, window_samples, stride_samples)
+                if not len(raw):
+                    skipped_short += 1
+                    continue
+                ends = starts + window_samples
+                temporal = np.full(len(starts), -1, dtype=np.int8)
+                keep = np.ones(len(starts), dtype=np.bool_)
+                event_stop = -1
+                with phases.track("window_label_seconds"):
+                    if recording.supervision_kind == "temporal":
+                        temporal, keep, intervals = segment_decision_time_labels(
+                            starts, ends, recording.annotations
+                        )
+                        event_count += len(intervals)
+                        dataset_events[recording.dataset_id] = dataset_events.get(
+                            recording.dataset_id, 0
+                        ) + len(intervals)
+                        exclusions = [
+                            (item.start_sample, item.stop_sample)
+                            for item in recording.annotations
+                            if item.kind == "exclude"
+                        ]
+                        excluded = np.asarray(
+                            [
+                                any(
+                                    start < excluded_stop and end > excluded_start
+                                    for excluded_start, excluded_stop in exclusions
+                                )
+                                for start, end in zip(starts, ends, strict=True)
+                            ],
+                            dtype=np.bool_,
+                        )
+                        skipped_exclusion += int(np.count_nonzero(excluded))
+                        skipped_post = int(np.count_nonzero((~keep) & (~excluded)))
+                        skipped_post_segment_overlap += skipped_post
+                        dataset_skipped_post_segment[recording.dataset_id] = (
+                            dataset_skipped_post_segment.get(recording.dataset_id, 0) + skipped_post
+                        )
+                        if intervals:
+                            event_stop = int(intervals[0][1])
+                    elif not recording.is_fall:
+                        temporal[:] = 0
+                    raw = raw[keep]
+                    starts = starts[keep]
+                    ends = ends[keep]
+                    temporal = temporal[keep]
+                if not len(raw):
+                    skipped_short += 1
+                    continue
+                if recording.supervision_kind == "temporal" and recording.is_fall:
+                    missing_positive = int(not np.any(temporal == 1))
+                    events_without_positive_window += missing_positive
+                    dataset_events_without_positive[recording.dataset_id] = (
+                        dataset_events_without_positive.get(recording.dataset_id, 0)
+                        + missing_positive
+                    )
+                with phases.track("feature_extraction_seconds"):
+                    features = extract_window_features(raw, sampling_rate_hz)
+                onset = recording.fall_event.onset_sample if recording.fall_event else -1
+                impact = recording.fall_event.impact_sample if recording.fall_event else -1
+                with phases.track("sequence_metadata_write_seconds"):
+                    for name, value in (
+                        ("dataset_id", recording.dataset_id),
+                        ("participant_id", recording.participant_id),
+                        ("recording_id", recording.recording_id),
+                        ("body_location", recording.body_location),
+                        ("activity", recording.activity),
+                        ("supervision_kind", recording.supervision_kind),
+                        ("is_fall", recording.is_fall),
+                        ("fold_id", fold),
+                        ("event_onset_sample", onset),
+                        ("event_impact_sample", impact),
+                        ("event_stop_sample", event_stop),
+                    ):
+                        _resize_write(sequences[name], np.asarray([value]))
+                with phases.track("cache_hdf5_write_seconds"):
+                    buffer.append(
+                        {
+                            "raw": raw,
+                            "features": features,
+                            "sequence_index": np.full(len(raw), sequence_count, dtype=np.int32),
+                            "start_sample": starts,
+                            "end_sample": ends,
+                            "fold_id": np.full(len(raw), fold, dtype=np.int8),
+                            "bag_label": np.full(len(raw), int(recording.is_fall), dtype=np.int8),
+                            "temporal_label": temporal,
+                        }
+                    )
+                sequence_count += 1
+                window_count += len(raw)
+                positive_temporal += int(np.count_nonzero(temporal == 1))
+                negative_temporal += int(np.count_nonzero(temporal == 0))
+                dataset_positive_temporal[recording.dataset_id] = dataset_positive_temporal.get(
+                    recording.dataset_id, 0
+                ) + int(np.count_nonzero(temporal == 1))
+                dataset_negative_temporal[recording.dataset_id] = dataset_negative_temporal.get(
+                    recording.dataset_id, 0
+                ) + int(np.count_nonzero(temporal == 0))
+                dataset_windows[recording.dataset_id] = dataset_windows.get(
+                    recording.dataset_id, 0
+                ) + len(raw)
+                dataset_sequences[recording.dataset_id] = (
+                    dataset_sequences.get(recording.dataset_id, 0) + 1
+                )
+            with phases.track("cache_hdf5_write_seconds"):
+                buffer.flush()
+                handle.flush()
+            build_seconds = time.perf_counter() - started
+            phase_seconds = phases.to_dict()
+            phase_seconds["container_overhead_seconds"] = max(
+                0.0, build_seconds - sum(phase_seconds.values())
+            )
+            manifest = {
+                "window_schema_version": WINDOW_CACHE_SCHEMA,
+                "feature_schema_version": config["contract"]["window"]["feature_schema_version"],
+                "data_split_fingerprint": fingerprint,
+                "contract_sha256": config["contract_sha256"],
+                "snapshot_sha256": config["snapshot_sha256"],
+                "sampling_rate_hz": sampling_rate_hz,
+                "window_samples": window_samples,
+                "stride_samples": stride_samples,
+                "cache_flush_windows": int(config["cache_flush_windows"]),
+                "sequences": sequence_count,
+                "windows": window_count,
+                "features": len(FEATURE_NAMES),
+                "fall_events": event_count,
+                "positive_temporal_windows": positive_temporal,
+                "negative_temporal_windows": negative_temporal,
+                "events_without_positive_window": events_without_positive_window,
+                "skipped_short_sequences": skipped_short,
+                "skipped_post_segment_overlap_windows": skipped_post_segment_overlap,
+                "skipped_exclusion_windows": skipped_exclusion,
+                "dataset_sequences": dict(sorted(dataset_sequences.items())),
+                "dataset_windows": dict(sorted(dataset_windows.items())),
+                "dataset_positive_temporal_windows": dict(
+                    sorted(dataset_positive_temporal.items())
+                ),
+                "dataset_negative_temporal_windows": dict(
+                    sorted(dataset_negative_temporal.items())
+                ),
+                "dataset_events": dict(sorted(dataset_events.items())),
+                "dataset_events_without_positive_window": dict(
+                    sorted(dataset_events_without_positive.items())
+                ),
+                "build_seconds": build_seconds,
+                "build_phase_seconds": phase_seconds,
+            }
+            handle.attrs["manifest_json"] = json.dumps(manifest, sort_keys=True)
+            if "kfall" in dataset_windows:
+                regression = {
+                    "windows": dataset_windows["kfall"],
+                    "positive": dataset_positive_temporal["kfall"],
+                    "negative": dataset_negative_temporal["kfall"],
+                    "events": dataset_events["kfall"],
+                    "events_without_positive_window": dataset_events_without_positive.get(
+                        "kfall", 0
+                    ),
+                    "skipped_post_segment_overlap_windows": dataset_skipped_post_segment.get(
+                        "kfall", 0
+                    ),
+                }
+                expected = {
+                    "windows": 53_365,
+                    "positive": 8_027,
+                    "negative": 45_338,
+                    "events": 2_346,
+                    "events_without_positive_window": 4,
+                    "skipped_post_segment_overlap_windows": 9_120,
+                }
+                if regression != expected:
+                    raise ValueError(
+                        "KFall window regression mismatch: "
+                        f"expected={expected}, actual={regression}"
+                    )
+            handle.flush()
+        os.replace(temporary, destination)
+    except BaseException:
+        if temporary.exists():
+            temporary.unlink()
+        raise
+    return destination, {**manifest, "cache_reused_this_invocation": False}
+
+
+@dataclass(frozen=True, slots=True)
+class UnifiedWindowStore:
+    path: Path
+    sequence_index: np.ndarray
+    start_sample: np.ndarray
+    end_sample: np.ndarray
+    fold_id: np.ndarray
+    bag_label: np.ndarray
+    temporal_label: np.ndarray
+    dataset_id: np.ndarray
+    participant_id: np.ndarray
+    recording_id: np.ndarray
+    body_location: np.ndarray
+    supervision_kind: np.ndarray
+    sequence_is_fall: np.ndarray
+    sequence_fold_id: np.ndarray
+    event_onset_sample: np.ndarray
+    event_impact_sample: np.ndarray
+    event_stop_sample: np.ndarray
+    manifest: dict[str, Any]
+
+    @property
+    def size(self) -> int:
+        return len(self.sequence_index)
+
+    def materialize(self, kind: str) -> np.ndarray:
+        if kind not in {"raw", "features"}:
+            raise ValueError(f"Unknown window input kind: {kind}")
+        with h5py.File(self.path, "r") as handle:
+            return np.asarray(handle[f"windows/{kind}"], dtype=np.float32)
+
+    def window_datasets(self) -> np.ndarray:
+        return self.dataset_id[self.sequence_index]
+
+    def window_participants(self) -> np.ndarray:
+        return self.participant_id[self.sequence_index]
+
+
+def load_unified_window_store(path: Path) -> UnifiedWindowStore:
+    with h5py.File(path, "r") as handle:
+        manifest = json.loads(str(handle.attrs["manifest_json"]))
+        store = UnifiedWindowStore(
+            path=path,
+            sequence_index=np.asarray(handle["windows/sequence_index"], dtype=np.int32),
+            start_sample=np.asarray(handle["windows/start_sample"], dtype=np.int32),
+            end_sample=np.asarray(handle["windows/end_sample"], dtype=np.int32),
+            fold_id=np.asarray(handle["windows/fold_id"], dtype=np.int8),
+            bag_label=np.asarray(handle["windows/bag_label"], dtype=np.int8),
+            temporal_label=np.asarray(handle["windows/temporal_label"], dtype=np.int8),
+            dataset_id=_text_array(handle["sequences/dataset_id"]),
+            participant_id=_text_array(handle["sequences/participant_id"]),
+            recording_id=_text_array(handle["sequences/recording_id"]),
+            body_location=_text_array(handle["sequences/body_location"]),
+            supervision_kind=_text_array(handle["sequences/supervision_kind"]),
+            sequence_is_fall=np.asarray(handle["sequences/is_fall"], dtype=np.bool_),
+            sequence_fold_id=np.asarray(handle["sequences/fold_id"], dtype=np.int8),
+            event_onset_sample=np.asarray(handle["sequences/event_onset_sample"], dtype=np.int64),
+            event_impact_sample=np.asarray(handle["sequences/event_impact_sample"], dtype=np.int64),
+            event_stop_sample=np.asarray(handle["sequences/event_stop_sample"], dtype=np.int64),
+            manifest=manifest,
+        )
+    if store.size != manifest["windows"]:
+        raise ValueError("Unified cache size does not match its manifest")
+    if np.any(store.end_sample - store.start_sample != manifest["window_samples"]):
+        raise ValueError("Unified cache contains invalid window lengths")
+    return store

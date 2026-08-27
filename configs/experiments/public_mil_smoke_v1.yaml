@@ -1,0 +1,26 @@
+schema_version: 1
+id: public_mil_smoke_v1
+contract_path: configs/contracts/imu_benchmark_contract_v1.json
+snapshot_path: data/snapshot_v1.json
+data_view_path: configs/data_views/public_recording_mil_v1.yaml
+model_catalog_path: configs/models/fall_models_v1.yaml
+models:
+  - threshold_impact
+  - torch_1d_cnn
+  - torch_lstm
+  - torch_cnn_lstm
+folds: [0]
+seeds: [3888]
+precision: fp32
+gpu_mode: auto
+runtime_budget_seconds: 900
+max_epochs: 2
+patience: 1
+max_sequences_per_split: 600
+max_windows_per_sequence: 48
+cache_flush_windows: 16384
+data_quality_status: research_only_recording_mil
+known_limitations:
+  - Public fall windows have recording-level labels only and are trained with MIL rather than temporal supervision.
+  - KFall is a frozen external evaluation dataset for this research-only view.
+  - Sensor-local axes and body locations are not harmonised across datasets.

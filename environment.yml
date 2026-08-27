@@ -9,6 +9,7 @@ dependencies:
   - cupy>=14.0.1
   - h5py>=3.12
   - numpy>=2
+  - pyyaml>=6.0,<7
   - scikit-learn>=1.9,<2
   - pytest>=8.4,<9
   - ruff>=0.12,<1
