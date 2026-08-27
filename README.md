@@ -154,6 +154,31 @@ experiment and must not be described as the fixed 110-job reproduction.
 deterministic candidate assignment for any newly discovered participants. Review and version a
 new split file explicitly; the command never mutates the current split.
 
+## Performance profiles
+
+Every computed job records separate timings for split selection, HDF5 input loading, model fit,
+validation/test or external inference, evaluation, checkpoint I/O, and GPU cleanup. Each run also
+writes `performance.json` beside its reports. It contains aggregate timings by phase and model,
+process CPU/I/O usage, peak memory, and run-level GPU utilisation sampled through `nvidia-smi`.
+Missing GPU telemetry is recorded as unavailable and does not invalidate model results. Resumed
+runs retain the original job timings stored in compatible checkpoints while reporting the current
+checkpoint-read overhead separately.
+
+The B3 RTX 4070 SUPER measurements were:
+
+| Smoke workload | Jobs | Job seconds | Model fit | Repeated HDF5 loads | Inference | Mean GPU utilisation | Peak device memory |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Current benchmark | 22 | 40.2 s | 23.0 s | 13.6 s | 2.1 s | 22.2% | 4.8 GiB |
+| KFall external | 8 | 11.0 s | 5.1 s | 3.5 s | 1.9 s | 23.5% | 5.1 GiB |
+
+| Fresh cache | Total | Source HDF5 reads | Engineered features | Cache HDF5 writes |
+|---|---:|---:|---:|---:|
+| Training | 144.4 s | 4.6 s | 38.8 s | 100.0 s |
+| KFall | 40.5 s | 19.0 s | — | 21.1 s |
+
+The Random Forest fit alone used 12.8 seconds. These dirty-snapshot measurements are engineering
+profiling evidence, not formal model-validation results.
+
 ## Persistent work directory
 
 Derived windows are written to `~/imu-fall-work/cache`. Checkpoints, status files, CSV metrics,
