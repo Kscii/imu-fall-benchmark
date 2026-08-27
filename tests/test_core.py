@@ -13,16 +13,16 @@ from imu_benchmark.data import (
     load_window_store,
     prepare_window_store,
 )
-from imu_benchmark.dataset import validate_data
+from imu_benchmark.dataset import Annotation, validate_data
 from imu_benchmark.device import CudaUnavailable
 from imu_benchmark.evaluation import best_threshold
 from imu_benchmark.kfall_data import (
     load_kfall_config,
     load_kfall_window_store,
     prepare_kfall_window_store,
-    strict_decision_time_labels,
 )
 from imu_benchmark.kfall_runner import _training_splits, plan_kfall_experiment
+from imu_benchmark.protocol import segment_decision_time_labels
 from imu_benchmark.runner import plan_experiment
 from imu_benchmark.runtime import (
     require_compute_runtime,
@@ -48,7 +48,7 @@ def test_distributed_data_and_split_validate() -> None:
 
 
 def test_reproduction_plan_contains_110_jobs() -> None:
-    config = load_config(PROJECT_ROOT / "configs/initial_validation_recheck_v1.json")
+    config = load_config(PROJECT_ROOT / "configs/data_contract_v1_validation.json")
     result = plan_experiment(
         config=config,
         profile_name="reproduce",
@@ -81,21 +81,23 @@ def test_threshold_tie_break_is_deterministic() -> None:
     assert first[1] == 1.0
 
 
-def test_strict_kfall_decision_time_boundaries() -> None:
+def test_segment_decision_time_boundaries() -> None:
     starts = np.asarray([0, 15, 30, 45, 60], dtype=np.int32)
     ends = starts + 60
-    labels, keep = strict_decision_time_labels(
-        starts,
-        ends,
-        onset_sample=70,
-        impact_sample=100,
+    labels, keep, intervals = segment_decision_time_labels(
+        starts, ends, (
+            Annotation("activity", 70, 101, "F01"),
+            Annotation("onset", 70, 70, "F01"),
+            Annotation("impact", 100, 100, "F01"),
+        )
     )
     assert labels.tolist() == [0, 1, 1, 0, 0]
     assert keep.tolist() == [True, True, True, False, False]
+    assert intervals == ((70, 101),)
 
 
 def test_kfall_workload_and_cache_contract() -> None:
-    config = load_kfall_config(PROJECT_ROOT / "configs/kfall_external_v1_provisional.json")
+    config = load_kfall_config(PROJECT_ROOT / "configs/kfall_segment_v1_validation.json")
     smoke = plan_kfall_experiment(config, "smoke")
     evaluate = plan_kfall_experiment(config, "evaluate")
     assert smoke["scheduled_jobs"] == 8
@@ -106,20 +108,25 @@ def test_kfall_workload_and_cache_contract() -> None:
         config=config,
     )
     store = load_kfall_window_store(path)
-    assert manifest["windows"] == store.size == 53_260
-    assert manifest["positive_windows"] == 3_489
+    assert manifest["windows"] == store.size
+    assert manifest["windows"] == 53_365
+    assert manifest["positive_windows"] == 8_027
+    assert manifest["negative_windows"] == 45_338
     assert manifest["fall_events"] == 2_346
-    assert manifest["events_without_positive_window"] == 33
-    assert manifest["skipped_post_impact_overlap_windows"] == 9_225
+    assert manifest["events_without_positive_window"] == 4
+    assert manifest["skipped_post_segment_overlap_windows"] == 9_120
 
 
 def test_kfall_training_fold_is_participant_disjoint() -> None:
-    config = load_kfall_config(PROJECT_ROOT / "configs/kfall_external_v1_provisional.json")
-    path, _manifest = prepare_window_store(
+    config = load_kfall_config(PROJECT_ROOT / "configs/kfall_segment_v1_validation.json")
+    path, manifest = prepare_window_store(
         project_root=PROJECT_ROOT,
         cache_root=CACHE_ROOT,
         config=config,
     )
+    assert manifest["sequences"] == 12_317
+    assert manifest["windows"] == 415_363
+    assert manifest["features"] == 158
     store = load_window_store(path)
     job = build_jobs(
         suites=("fall_universal",), models=("threshold_impact",), folds=(0,)
