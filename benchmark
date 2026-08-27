@@ -22,11 +22,12 @@ Main commands:
   doctor                 Verify WSL2, CUDA, paths, and GPU model backends
   test                   Run Ruff and pytest in the project environment
   validate-data          Validate Git LFS data, HDF5 schemas, and folds
-  prepare                Build or reuse the external window cache
-  smoke                  Run the fixed 22-job smoke profile
-  reproduce --resume     Run the fixed 110-job reproduction
+  smoke                  Run the default seven-model KFall smoke experiment
+  plan CONFIG.yaml       Resolve an experiment without training
+  run CONFIG.yaml        Run a versioned experiment
+  report RUN_ID          Regenerate a report from completed checkpoints
 
-All other arguments are forwarded to the advanced imu-bench CLI.
+All commands use the same versioned YAML configuration interface.
 EOF
 }
 

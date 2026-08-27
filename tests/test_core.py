@@ -7,21 +7,14 @@ import numpy as np
 import pytest
 
 from imu_benchmark import runtime
+from imu_benchmark.configuration import PUBLIC_MODEL_IDS, load_experiment
 from imu_benchmark.data import (
     extract_window_features,
-    load_config,
-    load_window_store,
-    prepare_window_store,
 )
 from imu_benchmark.dataset import Annotation, validate_data
 from imu_benchmark.device import CudaUnavailable, _parse_nvidia_smi_line
+from imu_benchmark.engine import plan_experiment
 from imu_benchmark.evaluation import best_threshold
-from imu_benchmark.kfall_data import (
-    load_kfall_config,
-    load_kfall_window_store,
-    prepare_kfall_window_store,
-)
-from imu_benchmark.kfall_runner import _training_splits, plan_kfall_experiment
 from imu_benchmark.performance import (
     PERFORMANCE_SCHEMA_VERSION,
     PhaseTimer,
@@ -30,16 +23,13 @@ from imu_benchmark.performance import (
     process_snapshot,
 )
 from imu_benchmark.protocol import segment_decision_time_labels
-from imu_benchmark.runner import plan_experiment
 from imu_benchmark.runtime import (
     require_compute_runtime,
     resolve_work_paths,
     source_provenance,
 )
-from imu_benchmark.specs import MODEL_IDS, SUITES, build_jobs
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CACHE_ROOT = resolve_work_paths().cache
 
 
 def test_distributed_data_and_split_validate() -> None:
@@ -54,20 +44,38 @@ def test_distributed_data_and_split_validate() -> None:
     assert result["external"]["split"]["participants"] == 32
 
 
-def test_reproduction_plan_contains_110_jobs() -> None:
-    config = load_config(PROJECT_ROOT / "configs/data_contract_v1_validation.json")
-    result = plan_experiment(
-        config=config,
-        profile_name="reproduce",
-        suites=SUITES,
-        models=MODEL_IDS,
+def test_kfall_smoke_plan_contains_seven_public_fall_models() -> None:
+    config = load_experiment(PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/kfall_smoke_v1.yaml")
+    result = plan_experiment(config)
+    assert result["scheduled_jobs"] == 7
+    assert tuple(result["models"]) == PUBLIC_MODEL_IDS
+    assert result["split_protocol"]["validation_fold_by_test_fold"] == {0: 1}
+    assert not result["research_only"]
+    assert all(job["objective"] == "temporal_supervised" for job in result["jobs"])
+
+
+def test_research_data_views_are_explicit() -> None:
+    mixed = load_experiment(
+        PROJECT_ROOT,
+        PROJECT_ROOT / "configs/experiments/kfall_public_adl_smoke_v1.yaml",
     )
-    assert result["scheduled_jobs"] == 110
-    assert result["jobs_by_suite"] == {
-        "position_paired": 50,
-        "fall_universal": 20,
-        "fall_chest_only": 20,
-        "fall_waist_only": 20,
+    mil = load_experiment(
+        PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/public_mil_smoke_v1.yaml"
+    )
+    assert mixed["data_view"]["research_only"]
+    assert mixed["data_view"]["negative_supplement_datasets"] == [
+        "cgu_bes",
+        "sisfall",
+        "uci_455",
+        "umafall",
+        "upfall",
+    ]
+    assert mil["data_view"]["objective"] == "recording_mil"
+    assert set(mil["models"]) == {
+        "threshold_impact",
+        "torch_1d_cnn",
+        "torch_lstm",
+        "torch_cnn_lstm",
     }
 
 
@@ -92,61 +100,27 @@ def test_segment_decision_time_boundaries() -> None:
     starts = np.asarray([0, 15, 30, 45, 60], dtype=np.int32)
     ends = starts + 60
     labels, keep, intervals = segment_decision_time_labels(
-        starts, ends, (
+        starts,
+        ends,
+        (
             Annotation("activity", 70, 101, "F01"),
             Annotation("onset", 70, 70, "F01"),
             Annotation("impact", 100, 100, "F01"),
-        )
+        ),
     )
     assert labels.tolist() == [0, 1, 1, 0, 0]
     assert keep.tolist() == [True, True, True, False, False]
     assert intervals == ((70, 101),)
 
 
-def test_kfall_workload_and_cache_contract() -> None:
-    config = load_kfall_config(PROJECT_ROOT / "configs/kfall_segment_v1_validation.json")
-    smoke = plan_kfall_experiment(config, "smoke")
-    evaluate = plan_kfall_experiment(config, "evaluate")
-    assert smoke["scheduled_jobs"] == 8
-    assert evaluate["scheduled_jobs"] == 40
-    path, manifest = prepare_kfall_window_store(
-        project_root=PROJECT_ROOT,
-        cache_root=CACHE_ROOT,
-        config=config,
+def test_bf16_config_is_an_apples_to_apples_sequence_comparison() -> None:
+    config = load_experiment(
+        PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/kfall_bf16_smoke_v1.yaml"
     )
-    store = load_kfall_window_store(path)
-    assert manifest["windows"] == store.size
-    assert manifest["windows"] == 53_365
-    assert manifest["positive_windows"] == 8_027
-    assert manifest["negative_windows"] == 45_338
-    assert manifest["fall_events"] == 2_346
-    assert manifest["events_without_positive_window"] == 4
-    assert manifest["skipped_post_segment_overlap_windows"] == 9_120
-
-
-def test_kfall_training_fold_is_participant_disjoint() -> None:
-    config = load_kfall_config(PROJECT_ROOT / "configs/kfall_segment_v1_validation.json")
-    path, manifest = prepare_window_store(
-        project_root=PROJECT_ROOT,
-        cache_root=CACHE_ROOT,
-        config=config,
-    )
-    assert manifest["sequences"] == 12_317
-    assert manifest["windows"] == 415_363
-    assert manifest["features"] == 158
-    store = load_window_store(path)
-    job = build_jobs(
-        suites=("fall_universal",), models=("threshold_impact",), folds=(0,)
-    )[0]
-    splits = _training_splits(
-        store,
-        job,
-        profile=config["profiles"]["smoke"],
-        seed=int(config["random_seed"]),
-    )
-    train = set(store.window_participants()[splits["train"]])
-    validation = set(store.window_participants()[splits["validation"]])
-    assert train.isdisjoint(validation)
+    assert config["precision"] == "bf16"
+    assert config["folds"] == [0]
+    assert config["seeds"] == [3888]
+    assert config["models"] == ["torch_1d_cnn", "torch_lstm", "torch_cnn_lstm"]
 
 
 def test_work_paths_use_visible_default_and_absolute_override(
@@ -232,9 +206,7 @@ def test_job_performance_aggregation_preserves_model_and_phase() -> None:
                     },
                 },
             },
-            "invocation_performance": {
-                "phase_seconds": {"checkpoint_write_seconds": 0.25}
-            },
+            "invocation_performance": {"phase_seconds": {"checkpoint_write_seconds": 0.25}},
         },
         {
             "status": "cached",
@@ -245,9 +217,7 @@ def test_job_performance_aggregation_preserves_model_and_phase() -> None:
                     "phase_seconds": {"model_fit_seconds": 1.0},
                 },
             },
-            "invocation_performance": {
-                "phase_seconds": {"checkpoint_read_seconds": 0.1}
-            },
+            "invocation_performance": {"phase_seconds": {"checkpoint_read_seconds": 0.1}},
         },
     ]
     result = aggregate_job_performance(results)

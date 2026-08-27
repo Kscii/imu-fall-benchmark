@@ -14,7 +14,15 @@ import sklearn
 from .device import cuda_environment
 from .models import create_adapter, release_gpu_memory
 from .runtime import is_wsl2, repository_is_on_linux_filesystem
-from .specs import MODEL_SPECS, TABULAR_MODEL_IDS
+from .sequence_models import _network, threshold_impact_scores
+from .specs import MODEL_SPECS
+
+PUBLIC_TABULAR_MODELS = (
+    "cuml_logistic_regression",
+    "cuml_random_forest",
+    "xgboost_cuda",
+)
+PUBLIC_SEQUENCE_MODELS = ("torch_1d_cnn", "torch_lstm", "torch_cnn_lstm")
 
 MINIMUM_RUNTIME_FREE_BYTES = 10 * 1024**3
 
@@ -40,16 +48,25 @@ def run_doctor(*, random_seed: int, project_root: Path, work_root: Path) -> dict
     features = rng.normal(size=(64, 8)).astype(np.float32)
     labels = np.asarray([0, 1] * 32, dtype=np.int8)
     models: list[dict[str, Any]] = []
-    for model_id in TABULAR_MODEL_IDS:
+    threshold_windows = rng.normal(size=(8, 60, 6)).astype(np.float32)
+    threshold_scores = threshold_impact_scores(threshold_windows)
+    models.append(
+        {
+            "model_id": "threshold_impact",
+            "status": "PASS",
+            "seconds": 0.0,
+            "fall_score_min": float(np.min(threshold_scores)),
+            "fall_score_max": float(np.max(threshold_scores)),
+            "strict_cuda": False,
+        }
+    )
+    for model_id in PUBLIC_TABULAR_MODELS:
         params = dict(MODEL_SPECS[model_id].fixed_params)
         if model_id in {"cuml_random_forest", "xgboost_cuda"}:
             params["n_estimators"] = 10
-        if model_id == "torch_mlp":
-            params["max_epochs"] = 2
-            params["patience"] = 1
         adapter = create_adapter(model_id, params, random_seed=random_seed)
         started = time.perf_counter()
-        adapter.fit(features, labels, final_epochs=2 if model_id == "torch_mlp" else None)
+        adapter.fit(features, labels)
         probabilities = adapter.predict_proba(features[:8])
         adapter.assert_cuda()
         models.append(
@@ -59,10 +76,33 @@ def run_doctor(*, random_seed: int, project_root: Path, work_root: Path) -> dict
                 "seconds": time.perf_counter() - started,
                 "probability_min": float(np.min(probabilities)),
                 "probability_max": float(np.max(probabilities)),
+                "strict_cuda": True,
             }
         )
         del adapter
         release_gpu_memory()
+    from .device import require_cuda_modules
+
+    _, _, torch, _ = require_cuda_modules()
+    for model_id in PUBLIC_SEQUENCE_MODELS:
+        started = time.perf_counter()
+        model = _network(model_id, dict(MODEL_SPECS[model_id].fixed_params))
+        values = torch.as_tensor(threshold_windows, device="cuda")
+        with torch.inference_mode():
+            output = model(values)
+        if output.shape != (len(threshold_windows),) or output.device.type != "cuda":
+            raise ValueError(f"Invalid CUDA sequence-model output for {model_id}")
+        models.append(
+            {
+                "model_id": model_id,
+                "status": "PASS",
+                "seconds": time.perf_counter() - started,
+                "strict_cuda": True,
+            }
+        )
+        del model, values, output
+        release_gpu_memory()
+    environment["torch_bf16_supported"] = bool(torch.cuda.is_bf16_supported())
     return {
         "status": "PASS",
         "random_seed": random_seed,

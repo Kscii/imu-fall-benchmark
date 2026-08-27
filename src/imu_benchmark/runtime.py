@@ -14,16 +14,11 @@ from .device import CudaUnavailable
 COMPUTE_COMMANDS = frozenset(
     {
         "doctor",
-        "prepare",
         "smoke",
-        "reproduce",
         "run",
-        "kfall-prepare",
-        "kfall-smoke",
-        "kfall-evaluate",
     }
 )
-FORMAL_COMMANDS = frozenset({"reproduce", "kfall-evaluate"})
+FORMAL_COMMANDS = frozenset({"run"})
 SOURCE_MANIFEST = ".imu-source.json"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
