@@ -1,0 +1,122 @@
+{
+  "snapshot_version": "imu_30hz_snapshot_v1",
+  "contract_version": "imu_benchmark_contract_v1",
+  "collections": {
+    "training": {
+      "data_path": "data/imu_30hz",
+      "split": {
+        "path": "data/splits/participant_folds_v2.csv",
+        "version": "participant_5fold_v2",
+        "sha256": "c86a5ff39fe4479db19e92840bb659d78ddc7f1f6a8481084553ee036bcddf30"
+      },
+      "datasets": [
+        {
+          "dataset_id": "cgu_bes",
+          "path": "data/imu_30hz/cgu_bes.h5",
+          "sha256": "761daca0e14bd53862e7af107634800f0765212ab94cb2e7779c4965fbc24d64",
+          "logical_content_sha256": "1e2400651813a749b412c3de6d78acc106322b7f45a50fc0ed09671d1a95f683",
+          "size_bytes": 1997659,
+          "participants": 15,
+          "sequences": 195,
+          "rows": 96488,
+          "annotations": 0,
+          "events": 0,
+          "segments": 0,
+          "fall_sequences": 60,
+          "supervision": {"recording": 195},
+          "body_locations": {"chest": 195}
+        },
+        {
+          "dataset_id": "sisfall",
+          "path": "data/imu_30hz/sisfall.h5",
+          "sha256": "a48881fc68cc7e1f2d3fa2bb9b70c095ca5f8b3a97beda7852106513c54688e8",
+          "logical_content_sha256": "ca51001664c598377f8dff6dc21a549c613894992f00111bbdf5314ef6ea120c",
+          "size_bytes": 49548477,
+          "participants": 38,
+          "sequences": 4505,
+          "rows": 2378936,
+          "annotations": 0,
+          "events": 0,
+          "segments": 0,
+          "fall_sequences": 1798,
+          "supervision": {"recording": 4505},
+          "body_locations": {"waist": 4505}
+        },
+        {
+          "dataset_id": "uci_455",
+          "path": "data/imu_30hz/uci_455.h5",
+          "sha256": "196dc21179a1d7377d1afcc5dedd573199209819093a93c500034e055481e802",
+          "logical_content_sha256": "e44a9ae9d21e3adb887a1120b659a2fd019c0d61d95204ea85ea4dac1ee8d1c2",
+          "size_bytes": 67352248,
+          "participants": 17,
+          "sequences": 5705,
+          "rows": 3270374,
+          "annotations": 0,
+          "events": 0,
+          "segments": 0,
+          "fall_sequences": 3134,
+          "supervision": {"recording": 5705},
+          "body_locations": {"chest": 2945, "waist": 2760}
+        },
+        {
+          "dataset_id": "umafall",
+          "path": "data/imu_30hz/umafall.h5",
+          "sha256": "fefa8dda11328666ac61fc5133e8025d5978ad5f928c113722fb14c7fd901346",
+          "logical_content_sha256": "c4324398a91f7bbe433e9c91b3635a058af1556633ea543cf29df76720ad8af0",
+          "size_bytes": 13077949,
+          "participants": 19,
+          "sequences": 1362,
+          "rows": 608590,
+          "annotations": 0,
+          "events": 0,
+          "segments": 0,
+          "fall_sequences": 397,
+          "supervision": {"recording": 1362},
+          "body_locations": {"chest": 745, "waist": 617}
+        },
+        {
+          "dataset_id": "upfall",
+          "path": "data/imu_30hz/upfall.h5",
+          "sha256": "e0f975caf0411a32f15bb188bb1bac4b3bd5c0d6e7df299539a6f5ba55fd7cf2",
+          "logical_content_sha256": "4d098d6c71a0e798afbb7f1f3457da2b3bd1e2d72aa187fb22cfc52eb9b27cbb",
+          "size_bytes": 9591526,
+          "participants": 17,
+          "sequences": 551,
+          "rows": 485830,
+          "annotations": 1165,
+          "events": 0,
+          "segments": 1165,
+          "fall_sequences": 255,
+          "supervision": {"recording": 551},
+          "body_locations": {"waist": 551}
+        }
+      ]
+    },
+    "external": {
+      "data_path": "data/external",
+      "split": {
+        "path": "data/splits/kfall_external_folds_v1.csv",
+        "version": "kfall_external_5fold_v1",
+        "sha256": "6ad9ac5cc9f839780eb4915089ecb2bf6b387e6cba9d21a303e58f427dcd38e5"
+      },
+      "datasets": [
+        {
+          "dataset_id": "kfall",
+          "path": "data/external/kfall.h5",
+          "sha256": "e484cf325212ea41c97773bb5ef80dd30bac3d86da610ea3ce0a5b9dcf40ae5a",
+          "logical_content_sha256": "188c0a311c21926372ca9c353dc322a8cca3d01d4894ba04b6dfd77926e7e6ef",
+          "size_bytes": 28003528,
+          "participants": 32,
+          "sequences": 5075,
+          "rows": 1200811,
+          "annotations": 14459,
+          "events": 2346,
+          "segments": 9767,
+          "fall_sequences": 2346,
+          "supervision": {"temporal": 5075},
+          "body_locations": {"lower_back": 5075}
+        }
+      ]
+    }
+  }
+}

@@ -24,7 +24,7 @@ from sklearn.metrics import (
 
 from .data import WindowStore, load_window_store, prepare_window_store
 from .device import GpuMemoryMonitor
-from .evaluation import best_threshold
+from .evaluation import best_threshold, false_positive_windows_per_hour
 from .kfall_data import (
     KFallWindowStore,
     load_kfall_window_store,
@@ -68,6 +68,10 @@ def plan_kfall_experiment(config: dict[str, Any], profile_name: str) -> dict[str
     jobs = build_jobs(suites=KFALL_SUITES, models=KFALL_MODELS, folds=folds)
     return {
         "experiment_version": config["experiment_version"],
+        "contract_version": config["contract_version"],
+        "contract_sha256": config["contract_sha256"],
+        "snapshot_version": config["snapshot_version"],
+        "snapshot_sha256": config["snapshot_sha256"],
         "profile": profile_name,
         "training_protocol": "four_folds_train_one_fold_validation",
         "external_dataset": "kfall",
@@ -439,6 +443,8 @@ def _event_metrics(
     fall_events = detected_events = no_decision_events = 0
     pre_onset_false_recordings = 0
     adl_recordings = adl_false_recordings = 0
+    adl_windows = adl_false_positive_windows = 0
+    adl_prediction_parts: list[np.ndarray] = []
     onset_latencies: list[float] = []
     impact_offsets: list[float] = []
     for sequence_id, fold in enumerate(store.sequence_fold_id):
@@ -457,10 +463,12 @@ def _event_metrics(
                 detected_events += 1
                 first_decision = int(np.min(store.end_sample[alerted] - 1))
                 onset_latencies.append(
-                    (first_decision - int(store.event_onset_sample[sequence_id])) / 30.0
+                    (first_decision - int(store.event_onset_sample[sequence_id]))
+                    / float(store.manifest["sampling_rate_hz"])
                 )
                 impact_offsets.append(
-                    (first_decision - int(store.event_impact_sample[sequence_id])) / 30.0
+                    (first_decision - int(store.event_impact_sample[sequence_id]))
+                    / float(store.manifest["sampling_rate_hz"])
                 )
             pre_onset = indices[
                 store.end_sample[indices] - 1 < store.event_onset_sample[sequence_id]
@@ -469,10 +477,26 @@ def _event_metrics(
                 pre_onset_false_recordings += 1
         else:
             adl_recordings += 1
-            if len(indices) and np.any(scores[indices] >= threshold):
+            positive_windows = scores[indices] >= threshold
+            adl_prediction_parts.append(positive_windows)
+            adl_windows += len(indices)
+            adl_false_positive_windows += int(np.count_nonzero(positive_windows))
+            if len(indices) and np.any(positive_windows):
                 adl_false_recordings += 1
     latency = np.asarray(onset_latencies, dtype=np.float64)
     impact = np.asarray(impact_offsets, dtype=np.float64)
+    counted_false_positives, negative_hours, false_positive_rate = (
+        false_positive_windows_per_hour(
+            np.concatenate(adl_prediction_parts).astype(np.float64),
+            threshold=0.5,
+            stride_samples=int(store.manifest["stride_samples"]),
+            sampling_rate_hz=float(store.manifest["sampling_rate_hz"]),
+        )
+        if adl_prediction_parts
+        else (0, 0.0, 0.0)
+    )
+    if counted_false_positives != adl_false_positive_windows:
+        raise ValueError("ADL false-positive window accounting mismatch")
     return {
         "fall_events": fall_events,
         "detected_events": detected_events,
@@ -486,6 +510,11 @@ def _event_metrics(
         "adl_false_positive_recordings": adl_false_recordings,
         "adl_recording_false_positive_rate": (
             adl_false_recordings / adl_recordings if adl_recordings else 0.0
+        ),
+        "adl_negative_window_hours": negative_hours,
+        "adl_false_positive_windows": adl_false_positive_windows,
+        "adl_false_positive_windows_per_hour": (
+            false_positive_rate if negative_hours else 0.0
         ),
         "onset_latency_median_s": float(np.median(latency)) if len(latency) else float("nan"),
         "onset_latency_p95_s": float(np.percentile(latency, 95)) if len(latency) else float("nan"),
@@ -608,7 +637,8 @@ def _write_report(
         f"- Jobs: {summary['completed_jobs']}/{summary['scheduled_jobs']}",
         f"- Data quality: `{summary['data_quality_status']}`",
         "- KFall was not used for model weights, normalisation, or early stopping.",
-        "- Positive window policy: decision time from onset through impact, inclusive.",
+        "- Positive window policy: decision time within the fall activity segment, "
+        "from onset through the adapter-provided impact-plus-one-second tail.",
         "- One above-threshold positive window is an event detection; N-of-M is not tested.",
         "",
         "## Zero-shot recording transfer",
@@ -638,8 +668,8 @@ def _write_report(
                 "## Frozen-weight participant-grouped threshold calibration",
                 "",
                 "| Suite | Model | Window BAcc | F1 | MCC | Event sensitivity | "
-                "ADL recording FPR | Onset latency median (s) |",
-                "|---|---|---:|---:|---:|---:|---:|---:|",
+                "ADL recording FPR | ADL FP windows/hour | Onset latency median (s) |",
+                "|---|---|---:|---:|---:|---:|---:|---:|---:|",
             ]
         )
         event_lookup = {(row["suite"], row["model_id"]): row for row in pooled_events}
@@ -650,6 +680,7 @@ def _write_report(
                 f"{row['balanced_accuracy']:.4f} | {row['f1']:.4f} | "
                 f"{row['mcc']:.4f} | {event['event_sensitivity']:.4f} | "
                 f"{event['adl_recording_false_positive_rate']:.4f} | "
+                f"{event['adl_false_positive_windows_per_hour']:.3f} | "
                 f"{event['onset_latency_median_s']:.3f} |"
             )
     else:

@@ -85,6 +85,10 @@ def plan_experiment(
     }
     return {
         "experiment_version": config["experiment_version"],
+        "contract_version": config["contract_version"],
+        "contract_sha256": config["contract_sha256"],
+        "snapshot_version": config["snapshot_version"],
+        "snapshot_sha256": config["snapshot_sha256"],
         "profile": profile_name,
         "runtime_budget_seconds": profile["runtime_budget_seconds"],
         "folds": folds,

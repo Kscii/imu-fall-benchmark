@@ -12,7 +12,9 @@ from typing import Any
 import h5py
 import numpy as np
 
+from .contract import load_contract_bundle
 from .dataset import iter_recordings
+from .protocol import segment_decision_time_labels
 
 SIGNAL_NAMES = (
     "acceleration_x_mps2",
@@ -68,13 +70,18 @@ FEATURE_NAMES = (
 
 
 def load_config(path: Path) -> dict[str, Any]:
-    config = json.loads(path.read_text(encoding="utf-8"))
+    bundle = load_contract_bundle(path)
+    config = {**bundle.effective_values(), **bundle.experiment}
     if config["sampling_rate_hz"] != 30:
         raise ValueError("The benchmark requires canonical 30 Hz input")
     if config["window_samples"] != 60 or config["stride_samples"] != 15:
         raise ValueError("The reproduction protocol requires 60-sample windows and stride 15")
     if set(config["profiles"]) != {"smoke", "reproduce"}:
         raise ValueError("Profiles must be exactly smoke and reproduce")
+    for profile_name, profile in config["profiles"].items():
+        folds = tuple(int(value) for value in profile.get("outer_folds", ()))
+        if not folds or len(set(folds)) != len(folds) or set(folds) - set(range(5)):
+            raise ValueError(f"Invalid outer folds in profile {profile_name}")
     return config
 
 
@@ -245,8 +252,14 @@ def prepare_window_store(
     source_fingerprint = _source_fingerprint(processed_root)
     split_path = project_root / config["split_path"]
     split_fingerprint = _file_sha256(split_path)
+    fingerprint_payload = {
+        "source": source_fingerprint,
+        "split": split_fingerprint,
+        "contract": config["contract_sha256"],
+        "snapshot": config["snapshot_sha256"],
+    }
     data_split_fingerprint = hashlib.sha256(
-        f"{source_fingerprint}:{split_fingerprint}".encode()
+        json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     schema = str(config["window_schema_version"])
     destination = cache_root / "windows" / schema / f"{data_split_fingerprint[:16]}.h5"
@@ -276,6 +289,10 @@ def prepare_window_store(
                 "source_fingerprint": source_fingerprint,
                 "split_fingerprint": split_fingerprint,
                 "data_split_fingerprint": data_split_fingerprint,
+                "contract_version": config["contract_version"],
+                "contract_sha256": config["contract_sha256"],
+                "snapshot_version": config["snapshot_version"],
+                "snapshot_sha256": config["snapshot_sha256"],
                 "sampling_rate_hz": config["sampling_rate_hz"],
                 "window_samples": config["window_samples"],
                 "stride_samples": config["stride_samples"],
@@ -339,6 +356,23 @@ def prepare_window_store(
             if not len(raw_windows):
                 skipped_short += 1
                 continue
+            ends = starts + config["window_samples"]
+            temporal = np.full(len(starts), -1, dtype=np.int8)
+            keep = np.ones(len(starts), dtype=np.bool_)
+            if recording.supervision_kind == "temporal":
+                temporal, keep, fall_intervals = segment_decision_time_labels(
+                    starts, ends, recording.annotations
+                )
+                event_count += len(fall_intervals)
+            elif not recording.is_fall:
+                temporal[:] = 0
+            raw_windows = raw_windows[keep]
+            starts = starts[keep]
+            ends = ends[keep]
+            temporal = temporal[keep]
+            if not len(raw_windows):
+                skipped_short += 1
+                continue
             for name, value in (
                 ("dataset_id", recording.dataset_id),
                 ("participant_id", recording.participant_id),
@@ -364,22 +398,6 @@ def prepare_window_store(
             features = extract_window_features(raw_windows, config["sampling_rate_hz"])
             _append(raw_dataset, raw_windows)
             _append(feature_dataset, features)
-            ends = starts + config["window_samples"]
-            temporal = np.full(len(starts), -1, dtype=np.int8)
-            if not recording.is_fall:
-                temporal[:] = 0
-            elif recording.fall_event is not None:
-                event_count += 1
-                onset_sample = recording.fall_event.onset_time_s * config["sampling_rate_hz"]
-                impact_sample = recording.fall_event.impact_time_s * config["sampling_rate_hz"]
-                decision_sample = ends - 1
-                deadline_sample = impact_sample + config.get(
-                    "post_impact_deadline_seconds", 1.0
-                ) * config["sampling_rate_hz"]
-                temporal[decision_sample < onset_sample] = 0
-                temporal[
-                    (decision_sample >= impact_sample) & (decision_sample <= deadline_sample)
-                ] = 1
             position = np.full(len(starts), -1, dtype=np.int8)
             if recording.body_location == "chest":
                 position[:] = 0
@@ -405,6 +423,13 @@ def prepare_window_store(
             "source_fingerprint": source_fingerprint,
             "split_fingerprint": split_fingerprint,
             "data_split_fingerprint": data_split_fingerprint,
+            "contract_version": config["contract_version"],
+            "contract_sha256": config["contract_sha256"],
+            "snapshot_version": config["snapshot_version"],
+            "snapshot_sha256": config["snapshot_sha256"],
+            "sampling_rate_hz": config["sampling_rate_hz"],
+            "window_samples": config["window_samples"],
+            "stride_samples": config["stride_samples"],
             "sequences": sequence_count,
             "windows": window_count,
             "features": len(FEATURE_NAMES),

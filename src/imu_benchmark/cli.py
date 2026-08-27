@@ -10,6 +10,7 @@ from .data import load_config, prepare_window_store
 from .dataset import validate_data
 from .device import CudaUnavailable
 from .doctor import run_doctor
+from .folds import fold_plan_csv, plan_fold_assignments
 from .kfall_data import load_kfall_config, prepare_kfall_window_store
 from .kfall_runner import (
     plan_kfall_experiment,
@@ -27,8 +28,8 @@ from .runtime import (
 from .specs import MODEL_IDS, SUITES
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG = PROJECT_ROOT / "configs/initial_validation_recheck_v1.json"
-DEFAULT_KFALL_CONFIG = PROJECT_ROOT / "configs/kfall_external_v1_provisional.json"
+DEFAULT_CONFIG = PROJECT_ROOT / "configs/data_contract_v1_validation.json"
+DEFAULT_KFALL_CONFIG = PROJECT_ROOT / "configs/kfall_segment_v1_validation.json"
 
 
 def _selection(value: str | None, allowed: tuple[str, ...], name: str) -> tuple[str, ...]:
@@ -71,6 +72,14 @@ def _doctor_result(config: dict, paths: WorkPaths) -> dict:
     return {**result, "paths": paths.to_dict(), "source": source, "warnings": warnings}
 
 
+def _validate_config_data(config: dict) -> dict:
+    return validate_data(
+        PROJECT_ROOT,
+        contract_path=Path(config["contract_path"]),
+        snapshot_path=Path(config["snapshot_path"]),
+    )
+
+
 def _run_fixed(
     profile: str,
     *,
@@ -79,7 +88,7 @@ def _run_fixed(
     paths: WorkPaths,
 ) -> dict:
     config = load_config(config_path.resolve())
-    data_validation = validate_data(PROJECT_ROOT)
+    data_validation = _validate_config_data(config)
     doctor = _doctor_result(config, paths)
     result = run_experiment(
         project_root=PROJECT_ROOT,
@@ -105,7 +114,7 @@ def _run_kfall(
     paths: WorkPaths,
 ) -> dict:
     config = load_kfall_config(config_path.resolve())
-    data_validation = validate_data(PROJECT_ROOT)
+    data_validation = _validate_config_data(config)
     doctor = _doctor_result(config, paths)
     result = run_kfall_experiment(
         project_root=PROJECT_ROOT,
@@ -146,6 +155,12 @@ def main() -> None:
     plan = commands.add_parser("plan", help="Print a workload plan without training")
     _add_selection_arguments(plan)
 
+    fold_plan = commands.add_parser(
+        "plan-folds", help="Print a deterministic candidate participant split"
+    )
+    fold_plan.add_argument("--collection", choices=("training", "external"), required=True)
+    fold_plan.add_argument("--format", choices=("json", "csv"), default="json")
+
     run = commands.add_parser("run", help="Run a selected advanced workload")
     _add_selection_arguments(run)
     run.add_argument("--folds", help="Comma-separated outer folds from 0 through 4")
@@ -158,7 +173,7 @@ def main() -> None:
         "kfall-plan", help="Print the provisional KFall workload without training"
     )
     kfall_plan.add_argument("--profile", choices=("smoke", "evaluate"), default="smoke")
-    commands.add_parser("kfall-prepare", help="Build or reuse the strict KFall window cache")
+    commands.add_parser("kfall-prepare", help="Build or reuse the segment-labelled KFall cache")
     commands.add_parser("kfall-smoke", help="Run the fixed 8-job KFall CUDA smoke profile")
     kfall_evaluate = commands.add_parser(
         "kfall-evaluate", help="Run the fixed 40-job KFall external evaluation"
@@ -183,10 +198,11 @@ def main() -> None:
             config = load_config(args.config.resolve())
             result = _doctor_result(config, paths)
         elif args.command == "validate-data":
-            result = validate_data(PROJECT_ROOT)
+            config = load_config(args.config.resolve())
+            result = _validate_config_data(config)
         elif args.command == "prepare":
             config = load_config(args.config.resolve())
-            validation = validate_data(PROJECT_ROOT)
+            validation = _validate_config_data(config)
             path, manifest = prepare_window_store(
                 project_root=PROJECT_ROOT, cache_root=paths.cache, config=config
             )
@@ -215,9 +231,14 @@ def main() -> None:
                 suites=suites,
                 models=models,
             )
+        elif args.command == "plan-folds":
+            result = plan_fold_assignments(PROJECT_ROOT, args.collection)
+            if args.format == "csv":
+                print(fold_plan_csv(result), end="")
+                return
         elif args.command == "run":
             config, suites, models = _configured(args)
-            validation = validate_data(PROJECT_ROOT)
+            validation = _validate_config_data(config)
             doctor = _doctor_result(config, paths)
             benchmark = run_experiment(
                 project_root=PROJECT_ROOT,
@@ -249,7 +270,7 @@ def main() -> None:
             result = plan_kfall_experiment(config, args.profile)
         elif args.command == "kfall-prepare":
             config = load_kfall_config(args.kfall_config.resolve())
-            validation = validate_data(PROJECT_ROOT)
+            validation = _validate_config_data(config)
             path, manifest = prepare_kfall_window_store(
                 project_root=PROJECT_ROOT,
                 cache_root=paths.cache,

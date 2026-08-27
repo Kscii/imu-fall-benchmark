@@ -1,0 +1,35 @@
+{
+  "experiment_version": "kfall_segment_v1_validation",
+  "contract_path": "configs/contracts/imu_benchmark_contract_v1.json",
+  "snapshot_path": "data/snapshot_v1.json",
+  "training_dataset_ids": ["cgu_bes", "sisfall", "uci_455", "umafall", "upfall"],
+  "external_dataset_id": "kfall",
+  "suites": ["fall_universal", "fall_waist_only"],
+  "models": ["threshold_impact", "torch_1d_cnn", "torch_lstm", "torch_cnn_lstm"],
+  "random_seed": 3888,
+  "data_quality_status": "provisional_kfall_adapter_v1",
+  "known_limitations": [
+    "KFall onset and impact points may be shifted by one 30 Hz sample in the current adapter output.",
+    "KFall uses the adapter-provided fall activity segment ending at impact plus one second.",
+    "KFall is lower-back data while the training suites use chest and/or waist sensor-local axes.",
+    "Window-level false positives per hour are not product alarm episodes per hour."
+  ],
+  "profiles": {
+    "smoke": {
+      "runtime_budget_seconds": 900,
+      "validation_folds": [0],
+      "max_epochs": 2,
+      "patience": 1,
+      "max_sequences_per_split": 600,
+      "max_windows_per_sequence": 48
+    },
+    "evaluate": {
+      "runtime_budget_seconds": 10800,
+      "validation_folds": [0, 1, 2, 3, 4],
+      "max_epochs": 50,
+      "patience": 8,
+      "max_sequences_per_split": null,
+      "max_windows_per_sequence": 256
+    }
+  }
+}

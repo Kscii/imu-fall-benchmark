@@ -12,21 +12,24 @@ from typing import Any
 import h5py
 import numpy as np
 
+from .contract import load_contract_bundle
 from .dataset import EXTERNAL_DATASET_IDS, iter_recordings
+from .protocol import segment_decision_time_labels
 
 
 def load_kfall_config(path: Path) -> dict[str, Any]:
-    config = json.loads(path.read_text(encoding="utf-8"))
+    bundle = load_contract_bundle(path)
+    config = {**bundle.effective_values(), **bundle.experiment}
     if config.get("data_schema_version") != "3.0.0":
         raise ValueError("KFall evaluation requires HDF5 schema 3.0.0")
     if config.get("sampling_rate_hz") != 30:
         raise ValueError("KFall evaluation requires canonical 30 Hz input")
     if config.get("window_samples") != 60 or config.get("stride_samples") != 15:
         raise ValueError("KFall evaluation requires 60-sample windows with stride 15")
-    if config.get("temporal_policy") != "strict_decision_time_onset_through_impact":
+    if config.get("temporal_policy") != "decision_time_within_fall_activity_segment":
         raise ValueError("Unexpected KFall temporal policy")
-    if config.get("post_impact_overlap_policy") != "exclude":
-        raise ValueError("Post-impact overlap windows must be excluded")
+    if config.get("post_segment_overlap_policy") != "exclude":
+        raise ValueError("Post-segment overlap windows must be excluded")
     if config.get("alarm_policy") != "single_window":
         raise ValueError("The provisional evaluation supports single-window alerts only")
     if set(config.get("profiles", {})) != {"smoke", "evaluate"}:
@@ -108,26 +111,6 @@ def _append(dataset: h5py.Dataset, values: np.ndarray) -> None:
     dataset[start:stop] = values
 
 
-def strict_decision_time_labels(
-    starts: np.ndarray,
-    ends: np.ndarray,
-    *,
-    onset_sample: int,
-    impact_sample: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Label windows using only information available at each window's decision time."""
-    if impact_sample < onset_sample:
-        raise ValueError("Fall impact must not precede fall onset")
-    starts = np.asarray(starts, dtype=np.int32)
-    ends = np.asarray(ends, dtype=np.int32)
-    if starts.shape != ends.shape or np.any(ends <= starts):
-        raise ValueError("Window starts and ends must be aligned non-empty intervals")
-    decision = ends - 1
-    labels = ((decision >= onset_sample) & (decision <= impact_sample)).astype(np.int8)
-    post_impact_overlap = (decision > impact_sample) & (starts <= impact_sample)
-    return labels, ~post_impact_overlap
-
-
 def prepare_kfall_window_store(
     *, project_root: Path, cache_root: Path, config: dict[str, Any]
 ) -> tuple[Path, dict[str, Any]]:
@@ -141,7 +124,9 @@ def prepare_kfall_window_store(
         "window_samples": config["window_samples"],
         "stride_samples": config["stride_samples"],
         "temporal_policy": config["temporal_policy"],
-        "post_impact_overlap_policy": config["post_impact_overlap_policy"],
+        "post_segment_overlap_policy": config["post_segment_overlap_policy"],
+        "contract": config["contract_sha256"],
+        "snapshot": config["snapshot_sha256"],
     }
     data_split_fingerprint = hashlib.sha256(
         json.dumps(policy_payload, sort_keys=True, separators=(",", ":")).encode()
@@ -167,7 +152,7 @@ def prepare_kfall_window_store(
         "fall_events": 0,
         "events_without_positive_window": 0,
         "skipped_short_sequences": 0,
-        "skipped_post_impact_overlap_windows": 0,
+        "skipped_post_segment_overlap_windows": 0,
         "skipped_exclusion_windows": 0,
     }
     text_dtype = h5py.string_dtype(encoding="utf-8")
@@ -182,7 +167,11 @@ def prepare_kfall_window_store(
                 "window_samples": config["window_samples"],
                 "stride_samples": config["stride_samples"],
                 "temporal_policy": config["temporal_policy"],
-                "post_impact_overlap_policy": config["post_impact_overlap_policy"],
+                "post_segment_overlap_policy": config["post_segment_overlap_policy"],
+                "contract_version": config["contract_version"],
+                "contract_sha256": config["contract_sha256"],
+                "snapshot_version": config["snapshot_version"],
+                "snapshot_sha256": config["snapshot_sha256"],
                 "data_quality_status": config["data_quality_status"],
                 "hdf5_compatibility": "1.14",
             }
@@ -197,6 +186,7 @@ def prepare_kfall_window_store(
             ("fold_id", "i1"),
             ("event_onset_sample", "i4"),
             ("event_impact_sample", "i4"),
+            ("event_fall_stop_sample", "i4"),
             ("event_has_decision_window", "?"),
         ):
             sequences.create_dataset(name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=True)
@@ -240,7 +230,7 @@ def prepare_kfall_window_store(
             ends = starts + int(config["window_samples"])
             labels = np.zeros(len(starts), dtype=np.int8)
             keep = np.ones(len(starts), dtype=np.bool_)
-            onset = impact = -1
+            onset = impact = fall_stop = -1
             has_positive = False
             if recording.is_fall:
                 counters["fall_events"] += 1
@@ -248,26 +238,19 @@ def prepare_kfall_window_store(
                     raise ValueError(f"KFall fall lacks onset/impact: {recording.recording_id}")
                 onset = recording.fall_event.onset_sample
                 impact = recording.fall_event.impact_sample
-                labels, temporal_keep = strict_decision_time_labels(
-                    starts,
-                    ends,
-                    onset_sample=onset,
-                    impact_sample=impact,
+                labels, temporal_keep, intervals = segment_decision_time_labels(
+                    starts, ends, recording.annotations
                 )
-                contamination = ~temporal_keep
-                keep &= temporal_keep
-                counters["skipped_post_impact_overlap_windows"] += int(
-                    np.count_nonzero(contamination)
-                )
-                has_positive = bool(np.any(labels[keep] == 1))
-                if not has_positive:
-                    counters["events_without_positive_window"] += 1
-            exclusions = [
-                (item.start_sample, item.stop_sample)
-                for item in recording.annotations
-                if item.kind == "exclude"
-            ]
-            if exclusions:
+                if len(intervals) != 1 or intervals[0][0] != onset:
+                    raise ValueError(
+                        f"KFall fall must have one onset-aligned segment: {recording.recording_id}"
+                    )
+                fall_stop = intervals[0][1]
+                exclusions = [
+                    (item.start_sample, item.stop_sample)
+                    for item in recording.annotations
+                    if item.kind == "exclude"
+                ]
                 excluded = np.asarray(
                     [
                         any(
@@ -278,8 +261,20 @@ def prepare_kfall_window_store(
                     ],
                     dtype=np.bool_,
                 )
-                keep &= ~excluded
                 counters["skipped_exclusion_windows"] += int(np.count_nonzero(excluded))
+                counters["skipped_post_segment_overlap_windows"] += int(
+                    np.count_nonzero((~temporal_keep) & (~excluded))
+                )
+                keep &= temporal_keep
+                has_positive = bool(np.any(labels[keep] == 1))
+                if not has_positive:
+                    counters["events_without_positive_window"] += 1
+            else:
+                labels, keep, intervals = segment_decision_time_labels(
+                    starts, ends, recording.annotations
+                )
+                if intervals:
+                    raise ValueError(f"KFall ADL contains fall segments: {recording.recording_id}")
 
             selected_raw = raw_windows[keep]
             selected_starts = starts[keep]
@@ -293,6 +288,7 @@ def prepare_kfall_window_store(
                 ("fold_id", fold),
                 ("event_onset_sample", onset),
                 ("event_impact_sample", impact),
+                ("event_fall_stop_sample", fall_stop),
                 ("event_has_decision_window", has_positive),
             ):
                 _append(sequences[name], np.asarray([value]))
@@ -317,7 +313,14 @@ def prepare_kfall_window_store(
             "split_fingerprint": split_fingerprint,
             "data_split_fingerprint": data_split_fingerprint,
             "temporal_policy": config["temporal_policy"],
-            "post_impact_overlap_policy": config["post_impact_overlap_policy"],
+            "post_segment_overlap_policy": config["post_segment_overlap_policy"],
+            "contract_version": config["contract_version"],
+            "contract_sha256": config["contract_sha256"],
+            "snapshot_version": config["snapshot_version"],
+            "snapshot_sha256": config["snapshot_sha256"],
+            "sampling_rate_hz": config["sampling_rate_hz"],
+            "window_samples": config["window_samples"],
+            "stride_samples": config["stride_samples"],
             "data_quality_status": config["data_quality_status"],
             **counters,
             "build_seconds": time.perf_counter() - started,
@@ -342,6 +345,7 @@ class KFallWindowStore:
     sequence_fold_id: np.ndarray
     event_onset_sample: np.ndarray
     event_impact_sample: np.ndarray
+    event_fall_stop_sample: np.ndarray
     event_has_decision_window: np.ndarray
     manifest: dict[str, Any]
 
@@ -411,6 +415,9 @@ def load_kfall_window_store(path: Path) -> KFallWindowStore:
             ),
             event_impact_sample=np.asarray(
                 handle["sequences/event_impact_sample"], dtype=np.int32
+            ),
+            event_fall_stop_sample=np.asarray(
+                handle["sequences/event_fall_stop_sample"], dtype=np.int32
             ),
             event_has_decision_window=np.asarray(
                 handle["sequences/event_has_decision_window"], dtype=np.bool_

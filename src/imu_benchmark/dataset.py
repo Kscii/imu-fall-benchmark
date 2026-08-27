@@ -11,6 +11,8 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+from .contract import DEFAULT_CONTRACT_PATH, DEFAULT_SNAPSHOT_PATH, load_contract_snapshot
+
 TRAINING_DATASET_IDS = ("cgu_bes", "sisfall", "uci_455", "umafall", "upfall")
 EXTERNAL_DATASET_IDS = ("kfall",)
 EXPECTED_SCHEMA_VERSION = "3.0.0"
@@ -302,7 +304,37 @@ def _check_file(path: Path) -> dict[str, object]:
         }
 
 
-def _check_checksums(project_root: Path) -> None:
+def validate_hdf5_file(path: Path) -> dict[str, object]:
+    result = _check_file(path)
+    participants = result.pop("participants")
+    if not isinstance(participants, set):
+        raise ValueError(f"Invalid participant summary: {path}")
+    return {**result, "participants": len(participants)}
+
+
+def _snapshot_files(snapshot: dict[str, object]) -> dict[str, tuple[str, int | None]]:
+    expected: dict[str, tuple[str, int | None]] = {}
+    collections = snapshot["collections"]
+    if not isinstance(collections, dict):
+        raise ValueError("Invalid snapshot collections")
+    for collection in collections.values():
+        if not isinstance(collection, dict):
+            raise ValueError("Invalid snapshot collection")
+        split = collection["split"]
+        if not isinstance(split, dict):
+            raise ValueError("Invalid snapshot split")
+        expected[str(split["path"])] = (str(split["sha256"]), None)
+        datasets = collection["datasets"]
+        if not isinstance(datasets, list):
+            raise ValueError("Invalid snapshot datasets")
+        for item in datasets:
+            if not isinstance(item, dict):
+                raise ValueError("Invalid snapshot dataset")
+            expected[str(item["path"])] = (str(item["sha256"]), int(item["size_bytes"]))
+    return expected
+
+
+def _check_checksums(project_root: Path, snapshot: dict[str, object]) -> None:
     manifest = project_root / "data/checksums.sha256"
     if not manifest.is_file():
         raise ValueError(f"Missing checksum manifest: {manifest}")
@@ -312,18 +344,18 @@ def _check_checksums(project_root: Path) -> None:
             continue
         digest, relative = line.split(maxsplit=1)
         expected[relative.strip()] = digest
-    required = {
-        *(f"data/imu_30hz/{dataset_id}.h5" for dataset_id in TRAINING_DATASET_IDS),
-        "data/external/kfall.h5",
-        "data/splits/participant_folds_v2.csv",
-        "data/splits/kfall_external_folds_v1.csv",
-    }
-    if set(expected) != required:
+    snapshot_files = _snapshot_files(snapshot)
+    if set(expected) != set(snapshot_files):
         raise ValueError("Checksum manifest does not exactly cover the distributed data")
-    for relative, digest in sorted(expected.items()):
+    for relative, (snapshot_digest, expected_size) in sorted(snapshot_files.items()):
+        digest = expected[relative]
+        if digest != snapshot_digest:
+            raise ValueError(f"Checksum manifest disagrees with snapshot: {relative}")
         path = project_root / relative
         if not path.is_file() or _sha256(path) != digest:
             raise ValueError(f"Checksum mismatch: {relative}")
+        if expected_size is not None and path.stat().st_size != expected_size:
+            raise ValueError(f"File size mismatch: {relative}")
 
 
 def _check_split(
@@ -357,47 +389,103 @@ def _check_split(
 
 
 def _validate_collection(
-    data_root: Path, expected_ids: Collection[str]
+    project_root: Path, collection: dict[str, object], expected_ids: Collection[str]
 ) -> tuple[dict[str, int], set[tuple[str, str]], list[dict[str, object]]]:
+    data_root = project_root / str(collection["data_path"])
+    entries = collection["datasets"]
+    if not isinstance(entries, list):
+        raise ValueError("Invalid snapshot dataset entries")
+    entry_by_id = {
+        str(item["dataset_id"]): item for item in entries if isinstance(item, dict)
+    }
+    if set(entry_by_id) != set(expected_ids):
+        raise ValueError("Snapshot dataset membership does not match the collection")
     totals = {"sequences": 0, "rows": 0, "annotations": 0, "events": 0, "segments": 0}
     participants: set[tuple[str, str]] = set()
     datasets: list[dict[str, object]] = []
     for path in _data_files(data_root, expected_ids):
         result = _check_file(path)
         dataset_id = str(result["dataset_id"])
-        participants.update((dataset_id, value) for value in result.pop("participants"))
+        entry = entry_by_id[dataset_id]
+        expected_path = (project_root / str(entry["path"])).resolve()
+        if path.resolve() != expected_path:
+            raise ValueError(f"Snapshot path mismatch for {dataset_id}")
+        dataset_participants = result.pop("participants")
+        if not isinstance(dataset_participants, set):
+            raise ValueError(f"Invalid participant summary for {dataset_id}")
+        if len(dataset_participants) != int(entry["participants"]):
+            raise ValueError(f"Participant count mismatch for {dataset_id}")
+        for field in (
+            "sequences",
+            "rows",
+            "annotations",
+            "events",
+            "segments",
+            "fall_sequences",
+            "logical_content_sha256",
+            "supervision",
+            "body_locations",
+        ):
+            if result[field] != entry[field]:
+                raise ValueError(f"Snapshot {field} mismatch for {dataset_id}")
+        participants.update((dataset_id, value) for value in dataset_participants)
         for name in totals:
             totals[name] += int(result[name])
         datasets.append(result)
     return totals, participants, datasets
 
 
-def validate_data(project_root: Path) -> dict[str, object]:
-    _check_checksums(project_root)
-    training_totals, training_participants, training_datasets = _validate_collection(
-        project_root / "data/imu_30hz", TRAINING_DATASET_IDS
+def validate_data(
+    project_root: Path,
+    *,
+    contract_path: Path = DEFAULT_CONTRACT_PATH,
+    snapshot_path: Path = DEFAULT_SNAPSHOT_PATH,
+) -> dict[str, object]:
+    contract, snapshot, contract_sha256, snapshot_sha256 = load_contract_snapshot(
+        project_root, contract_path=contract_path, snapshot_path=snapshot_path
     )
+    _check_checksums(project_root, snapshot)
+    collections = snapshot["collections"]
+    if not isinstance(collections, dict):
+        raise ValueError("Invalid snapshot collections")
+    training_collection = collections["training"]
+    external_collection = collections["external"]
+    if not isinstance(training_collection, dict) or not isinstance(external_collection, dict):
+        raise ValueError("Invalid snapshot collection shape")
+    training_totals, training_participants, training_datasets = _validate_collection(
+        project_root, training_collection, TRAINING_DATASET_IDS
+    )
+    training_split = training_collection["split"]
+    if not isinstance(training_split, dict):
+        raise ValueError("Invalid training split manifest")
     training_split = _check_split(
-        project_root / "data/splits/participant_folds_v2.csv",
+        project_root / str(training_split["path"]),
         training_participants,
-        split_version="participant_5fold_v2",
+        split_version=str(training_split["version"]),
     )
     external_totals, external_participants, external_datasets = _validate_collection(
-        project_root / "data/external", EXTERNAL_DATASET_IDS
+        project_root, external_collection, EXTERNAL_DATASET_IDS
     )
     kfall = external_datasets[0]
     if kfall["supervision"] != {"temporal": 5075}:
         raise ValueError("KFall must contain 5,075 temporal sequences")
     if kfall["body_locations"] != {"lower_back": 5075}:
         raise ValueError("KFall must contain lower_back sequences only")
+    external_split_manifest = external_collection["split"]
+    if not isinstance(external_split_manifest, dict):
+        raise ValueError("Invalid external split manifest")
     external_split = _check_split(
-        project_root / "data/splits/kfall_external_folds_v1.csv",
+        project_root / str(external_split_manifest["path"]),
         external_participants,
-        split_version="kfall_external_5fold_v1",
+        split_version=str(external_split_manifest["version"]),
     )
     return {
         "status": "PASS",
-        "schema_version": EXPECTED_SCHEMA_VERSION,
+        "schema_version": contract["data_schema_version"],
+        "contract_version": contract["contract_version"],
+        "contract_sha256": contract_sha256,
+        "snapshot_version": snapshot["snapshot_version"],
+        "snapshot_sha256": snapshot_sha256,
         "training": {
             "files": len(training_datasets),
             **training_totals,

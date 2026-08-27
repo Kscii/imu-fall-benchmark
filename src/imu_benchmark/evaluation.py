@@ -4,6 +4,24 @@ import numpy as np
 from sklearn.metrics import matthews_corrcoef, roc_curve
 
 
+def false_positive_windows_per_hour(
+    scores: np.ndarray,
+    *,
+    threshold: float,
+    stride_samples: int,
+    sampling_rate_hz: float,
+) -> tuple[int, float, float]:
+    values = np.asarray(scores, dtype=np.float64)
+    if values.ndim != 1 or not np.isfinite(values).all():
+        raise ValueError("Window scores must be a finite one-dimensional array")
+    if stride_samples <= 0 or sampling_rate_hz <= 0:
+        raise ValueError("Stride and sampling rate must be positive")
+    false_positives = int(np.count_nonzero(values >= threshold))
+    negative_hours = len(values) * stride_samples / sampling_rate_hz / 3600.0
+    rate = false_positives / negative_hours if negative_hours else 0.0
+    return false_positives, negative_hours, rate
+
+
 def best_threshold(labels: np.ndarray, scores: np.ndarray) -> tuple[float, float, float]:
     false_positive_rate, true_positive_rate, thresholds = roc_curve(
         labels, scores, drop_intermediate=False
