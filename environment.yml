@@ -1,0 +1,16 @@
+name: imu-fall-benchmark
+channels:
+  - rapidsai
+  - conda-forge
+  - nvidia
+dependencies:
+  - python=3.12
+  - cuda-version=12.9
+  - cuml=26.08
+  - cupy>=14.0.1
+  - h5py>=3.12
+  - numpy>=2
+  - scikit-learn>=1.9,<2
+  - pip
+  - pip:
+      - xgboost-cu12==3.4.0
