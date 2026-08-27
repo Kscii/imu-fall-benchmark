@@ -15,7 +15,8 @@ N-of-M alert policy.
 
 The verified reference host is Windows 11 with WSL2 Ubuntu 22.04.5, an NVIDIA RTX 4070 SUPER
 (12 GB), Python 3.12, CUDA 12.9, RAPIDS 26.08, XGBoost 3.4.0, and PyTorch 2.8.0 CUDA 12.9.
-Other NVIDIA GPU and WSL combinations are not yet claimed as verified.
+Other NVIDIA GPU and WSL combinations are not yet claimed as verified. Compute commands reject
+native Linux, macOS, Windows Python, WSL1, and repositories stored under `/mnt/`.
 
 Keep the repository in the WSL Linux filesystem, such as `~/projects`. Do not run it from
 `/mnt/c`, where filesystem I/O can be substantially slower. Install the NVIDIA display driver on
@@ -23,45 +24,39 @@ Windows; do not install a second Linux display driver inside WSL.
 
 ## First-time setup in WSL2
 
-Install Git and Git LFS inside WSL. A Git LFS installation in Git for Windows does not replace the
-WSL installation when cloning with WSL Git.
+Install the small system prerequisites inside WSL. A Git LFS installation in Git for Windows does
+not replace the WSL installation.
 
 ```bash
 sudo apt update
-sudo apt install --yes git git-lfs
-git lfs install
+sudo apt install --yes git git-lfs curl ca-certificates
 
 mkdir -p ~/projects
 cd ~/projects
 git clone <private-repository-url> imu-fall-benchmark
 cd imu-fall-benchmark
-git lfs pull
-git lfs fsck
+./benchmark setup
 ```
 
-Install [Miniforge](https://github.com/conda-forge/miniforge) in WSL, start a new shell, then run:
-
-```bash
-conda env create -f environment.yml
-conda activate imu-fall-benchmark
-python -m pip install -r requirements-torch-cu129.txt
-python -m pip install --no-deps -e .
-```
-
-Do not replace the CUDA, RAPIDS, XGBoost, or PyTorch versions without creating a new experiment
-configuration and recording the change.
+`setup` installs/pulls/verifies Git LFS data, reuses `~/miniforge3` when available, or installs the
+pinned Miniforge distribution without `sudo`. It creates an immutable Conda environment keyed by
+the dependency manifests. Repeating `setup` with unchanged dependencies reuses that environment.
+Do not replace CUDA, RAPIDS, XGBoost, or PyTorch versions without changing the dependency
+manifests and recording a new experiment version.
 
 ## Reproduce the benchmark
 
 Run the three main commands from the repository root:
 
 ```bash
-imu-bench doctor
-imu-bench smoke
-imu-bench reproduce --resume
+./benchmark doctor
+./benchmark test
+./benchmark smoke
+./benchmark reproduce --resume
 ```
 
-- `doctor` verifies CUDA access and exercises all seven tabular/MLP GPU backends.
+- `doctor` verifies WSL2, paths, disk space, CUDA access, and all seven tabular/MLP GPU backends.
+- `test` runs the tracked Ruff and pytest checks in the same WSL environment.
 - `smoke` validates data, builds or reuses the window cache, and runs 22 jobs on fold 0 with
   controlled sampling and two training epochs.
 - `reproduce` runs the fixed five-fold, 110-job conclusion recheck. `--resume` reuses compatible
@@ -70,7 +65,8 @@ imu-bench reproduce --resume
 On the reference RTX 4070 SUPER, the previous data snapshot required about three minutes to build
 the window cache, less than one minute for smoke, and about 70 minutes for the complete run.
 For the current corrected data, allow approximately 75–100 minutes after installation. A fresh
-Conda environment commonly adds another 20–60 minutes depending on network speed.
+Conda environment commonly adds another 20–60 minutes depending on network speed. At least
+25 GiB free space is required before a fresh toolchain installation.
 
 The recheck intentionally uses the current corrected HDF5 files. It evaluates whether the model
 ranking and the universal-versus-dedicated conclusions remain supported; it does not promise
@@ -83,11 +79,11 @@ Threshold Impact, 1D CNN, LSTM, and CNN-LSTM variants on the five recording-labe
 then performs frozen-weight inference on lower-back KFall recordings.
 
 ```bash
-imu-bench kfall-plan --profile smoke
-imu-bench kfall-prepare
-imu-bench kfall-smoke
-imu-bench kfall-evaluate --resume
-imu-bench kfall-report --profile evaluate
+./benchmark kfall-plan --profile smoke
+./benchmark kfall-prepare
+./benchmark kfall-smoke
+./benchmark kfall-evaluate --resume
+./benchmark kfall-report --profile evaluate
 ```
 
 - Universal and waist-only training are evaluated separately.
@@ -120,6 +116,8 @@ validation evidence.
   comparisons retained.
 - Seed: `3888`; PyTorch deterministic algorithms are enabled and the execution environment is
   recorded in each run manifest.
+- Source provenance: each run records a Git commit or snapshot digest and dirty/unknown warnings.
+  Warnings do not block exploratory or full runs, but they must be considered during review.
 - Data schema: HDF5 v3 (`3.0.0`); derived window caches are fingerprints of source HDF5 content,
   split files, and the applicable temporal policy.
 
@@ -129,21 +127,23 @@ These commands are useful for inspection and targeted experiments but are not th
 reproduction path:
 
 ```bash
-imu-bench validate-data
-imu-bench prepare
-imu-bench plan --profile reproduce
-imu-bench run --profile smoke --models torch_cnn_lstm --suites fall_universal --folds 0
-imu-bench report --profile reproduce
+./benchmark validate-data
+./benchmark prepare
+./benchmark plan --profile reproduce
+./benchmark run --profile smoke --models torch_cnn_lstm --suites fall_universal --folds 0
+./benchmark report --profile reproduce
 ```
 
 `run` accepts comma-separated `--models`, `--suites`, and `--folds`. Such a run is a custom
 experiment and must not be described as the fixed 110-job reproduction.
 
-## Local outputs
+## Persistent work directory
 
-Derived windows are written under `cache/`. Checkpoints, status files, CSV metrics, comparisons,
-subgroup results, manifests, and Markdown summaries are written under `runs/`. Both directories
-are ignored by Git. Development pytest files are also local-only and are not distributed.
+Derived windows are written to `~/imu-fall-work/cache`. Checkpoints, status files, CSV metrics,
+comparisons, subgroup results, manifests, and Markdown summaries are written below
+`~/imu-fall-work/runs`. Set `IMU_BENCH_WORK_ROOT` to an absolute path to override both locations.
+Keeping these files outside the clone allows source snapshots to be replaced without losing cache
+or resume state. The test suite is versioned with the source; generated test caches are not.
 
 See [`data/README.md`](data/README.md) for dataset sources, counts, field definitions, and the HDF5
 layout.
