@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import importlib
 import platform
+import shutil
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 
 class CudaUnavailable(RuntimeError):
@@ -70,6 +75,7 @@ def cuda_environment() -> dict[str, Any]:
 class GpuMemoryMonitor:
     interval_seconds: float = 0.02
     peak_used_bytes: int = 0
+    start_used_bytes: int = 0
     _stop: threading.Event = field(init=False, repr=False)
     _thread: threading.Thread | None = field(init=False, default=None, repr=False)
     _total_bytes: int = field(init=False, default=0, repr=False)
@@ -81,7 +87,8 @@ class GpuMemoryMonitor:
         cp, _, _, _ = require_cuda_modules()
         free_bytes, total_bytes = cp.cuda.runtime.memGetInfo()
         self._total_bytes = int(total_bytes)
-        self.peak_used_bytes = self._total_bytes - int(free_bytes)
+        self.start_used_bytes = self._total_bytes - int(free_bytes)
+        self.peak_used_bytes = self.start_used_bytes
         self._thread = threading.Thread(target=self._sample, daemon=True)
         self._thread.start()
         return self
@@ -98,3 +105,121 @@ class GpuMemoryMonitor:
         if self._thread is not None:
             self._thread.join(timeout=2)
         return self.peak_used_bytes
+
+
+def _parse_nvidia_smi_line(line: str) -> dict[str, float | None] | None:
+    fields = [value.strip() for value in line.split(",")]
+    if len(fields) != 4:
+        return None
+
+    def number(value: str) -> float | None:
+        try:
+            return float(value)
+        except ValueError:
+            return None
+
+    gpu_utilization, memory_utilization, memory_used_mib, power_watts = map(number, fields)
+    if gpu_utilization is None or memory_used_mib is None:
+        return None
+    return {
+        "gpu_utilization_percent": gpu_utilization,
+        "memory_utilization_percent": memory_utilization,
+        "memory_used_mib": memory_used_mib,
+        "power_watts": power_watts,
+    }
+
+
+@dataclass(slots=True)
+class NvidiaSmiMonitor:
+    """Collect low-overhead run-level GPU telemetry from nvidia-smi."""
+
+    interval_ms: int = 100
+    _process: subprocess.Popen[str] | None = field(init=False, default=None, repr=False)
+    _thread: threading.Thread | None = field(init=False, default=None, repr=False)
+    _samples: list[tuple[float, dict[str, float | None]]] = field(
+        init=False, default_factory=list, repr=False
+    )
+    _lock: threading.Lock = field(init=False, default_factory=threading.Lock, repr=False)
+    _error: str | None = field(init=False, default=None, repr=False)
+
+    def start(self) -> NvidiaSmiMonitor:
+        executable = shutil.which("nvidia-smi")
+        fallback = Path("/usr/lib/wsl/lib/nvidia-smi")
+        if executable is None and fallback.is_file():
+            executable = str(fallback)
+        if executable is None:
+            self._error = "nvidia-smi_not_found"
+            return self
+        command = (
+            executable,
+            "--id=0",
+            "--query-gpu=utilization.gpu,utilization.memory,memory.used,power.draw",
+            "--format=csv,noheader,nounits",
+            f"--loop-ms={self.interval_ms}",
+        )
+        try:
+            self._process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
+        except OSError as error:
+            self._error = f"nvidia-smi_start_failed:{error}"
+            return self
+        self._thread = threading.Thread(target=self._collect, daemon=True)
+        self._thread.start()
+        return self
+
+    def _collect(self) -> None:
+        if self._process is None or self._process.stdout is None:
+            return
+        for line in self._process.stdout:
+            sample = _parse_nvidia_smi_line(line)
+            if sample is None:
+                continue
+            with self._lock:
+                self._samples.append((time.perf_counter(), sample))
+
+    def stop(self) -> None:
+        if self._process is not None and self._process.poll() is None:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+                self._process.wait(timeout=2)
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+
+    def summary(self, started: float, stopped: float) -> dict[str, Any]:
+        with self._lock:
+            samples = [
+                sample for timestamp, sample in self._samples if started <= timestamp <= stopped
+            ]
+        if not samples:
+            return {
+                "status": "unavailable",
+                "samples": 0,
+                "reason": self._error or "no_samples_in_interval",
+            }
+        result: dict[str, Any] = {"status": "available", "samples": len(samples)}
+        for name in (
+            "gpu_utilization_percent",
+            "memory_utilization_percent",
+            "memory_used_mib",
+            "power_watts",
+        ):
+            values = np.asarray(
+                [sample[name] for sample in samples if sample[name] is not None],
+                dtype=np.float64,
+            )
+            if not len(values):
+                continue
+            result[name] = {
+                "mean": float(np.mean(values)),
+                "p95": float(np.percentile(values, 95)),
+                "max": float(np.max(values)),
+            }
+        return result

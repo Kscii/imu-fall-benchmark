@@ -14,6 +14,7 @@ import numpy as np
 
 from .contract import load_contract_bundle
 from .dataset import EXTERNAL_DATASET_IDS, iter_recordings
+from .performance import PhaseTimer
 from .protocol import segment_decision_time_labels
 
 
@@ -138,7 +139,7 @@ def prepare_kfall_window_store(
             manifest = json.loads(str(handle.attrs["manifest_json"]))
         if manifest.get("data_split_fingerprint") != data_split_fingerprint:
             raise ValueError(f"Conflicting KFall cache: {destination}")
-        return destination, manifest
+        return destination, {**manifest, "cache_reused_this_invocation": True}
 
     folds = _external_folds(split_path, str(config["external_split_version"]))
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -155,6 +156,7 @@ def prepare_kfall_window_store(
         "skipped_post_segment_overlap_windows": 0,
         "skipped_exclusion_windows": 0,
     }
+    phases = PhaseTimer()
     text_dtype = h5py.string_dtype(encoding="utf-8")
     with h5py.File(temporary, "w", libver=("earliest", "v114")) as handle:
         handle.attrs.update(
@@ -213,17 +215,17 @@ def prepare_kfall_window_store(
             )
         }
 
-        for recording in iter_recordings(
-            data_root, expected_dataset_ids=EXTERNAL_DATASET_IDS
-        ):
+        recordings = iter_recordings(data_root, expected_dataset_ids=EXTERNAL_DATASET_IDS)
+        for recording in phases.iterate("source_hdf5_read_seconds", recordings):
             if recording.supervision_kind != "temporal" or recording.body_location != "lower_back":
                 raise ValueError(f"Unexpected KFall sequence contract: {recording.recording_id}")
             fold = folds.get(recording.participant_id)
             if fold is None:
                 raise ValueError(f"Missing KFall participant fold: {recording.participant_id}")
-            raw_windows, starts = _windows(
-                recording.values, config["window_samples"], config["stride_samples"]
-            )
+            with phases.track("window_generation_seconds"):
+                raw_windows, starts = _windows(
+                    recording.values, config["window_samples"], config["stride_samples"]
+                )
             if not len(raw_windows):
                 counters["skipped_short_sequences"] += 1
                 continue
@@ -232,6 +234,7 @@ def prepare_kfall_window_store(
             keep = np.ones(len(starts), dtype=np.bool_)
             onset = impact = fall_stop = -1
             has_positive = False
+            label_started = time.perf_counter()
             if recording.is_fall:
                 counters["fall_events"] += 1
                 if recording.fall_event is None:
@@ -275,24 +278,15 @@ def prepare_kfall_window_store(
                 )
                 if intervals:
                     raise ValueError(f"KFall ADL contains fall segments: {recording.recording_id}")
+            phases.seconds["window_label_seconds"] = phases.seconds.get(
+                "window_label_seconds", 0.0
+            ) + (time.perf_counter() - label_started)
 
             selected_raw = raw_windows[keep]
             selected_starts = starts[keep]
             selected_ends = ends[keep]
             selected_labels = labels[keep]
             sequence_index = counters["sequences"]
-            for name, value in (
-                ("participant_id", recording.participant_id),
-                ("recording_id", recording.recording_id),
-                ("is_fall", recording.is_fall),
-                ("fold_id", fold),
-                ("event_onset_sample", onset),
-                ("event_impact_sample", impact),
-                ("event_fall_stop_sample", fall_stop),
-                ("event_has_decision_window", has_positive),
-            ):
-                _append(sequences[name], np.asarray([value]))
-            _append(raw_dataset, selected_raw)
             values = {
                 "sequence_index": np.full(len(selected_raw), sequence_index, dtype=np.int32),
                 "start_sample": selected_starts,
@@ -300,13 +294,31 @@ def prepare_kfall_window_store(
                 "fold_id": np.full(len(selected_raw), fold, dtype=np.int8),
                 "temporal_label": selected_labels,
             }
-            for name, array in values.items():
-                _append(scalar_datasets[name], array)
+            with phases.track("cache_hdf5_write_seconds"):
+                for name, value in (
+                    ("participant_id", recording.participant_id),
+                    ("recording_id", recording.recording_id),
+                    ("is_fall", recording.is_fall),
+                    ("fold_id", fold),
+                    ("event_onset_sample", onset),
+                    ("event_impact_sample", impact),
+                    ("event_fall_stop_sample", fall_stop),
+                    ("event_has_decision_window", has_positive),
+                ):
+                    _append(sequences[name], np.asarray([value]))
+                _append(raw_dataset, selected_raw)
+                for name, array in values.items():
+                    _append(scalar_datasets[name], array)
             counters["sequences"] += 1
             counters["windows"] += len(selected_raw)
             counters["positive_windows"] += int(np.count_nonzero(selected_labels == 1))
             counters["negative_windows"] += int(np.count_nonzero(selected_labels == 0))
 
+        build_seconds = time.perf_counter() - started
+        phase_seconds = phases.to_dict()
+        phase_seconds["container_overhead_seconds"] = max(
+            0.0, build_seconds - sum(phase_seconds.values())
+        )
         manifest = {
             "window_schema_version": schema,
             "source_fingerprint": source_fingerprint,
@@ -323,12 +335,13 @@ def prepare_kfall_window_store(
             "stride_samples": config["stride_samples"],
             "data_quality_status": config["data_quality_status"],
             **counters,
-            "build_seconds": time.perf_counter() - started,
+            "build_seconds": build_seconds,
+            "build_phase_seconds": phase_seconds,
         }
         handle.attrs["manifest_json"] = json.dumps(manifest, sort_keys=True)
         handle.flush()
     os.replace(temporary, destination)
-    return destination, manifest
+    return destination, {**manifest, "cache_reused_this_invocation": False}
 
 
 @dataclass(frozen=True, slots=True)

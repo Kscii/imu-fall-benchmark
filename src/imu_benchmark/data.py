@@ -14,6 +14,7 @@ import numpy as np
 
 from .contract import load_contract_bundle
 from .dataset import iter_recordings
+from .performance import PhaseTimer
 from .protocol import segment_decision_time_labels
 
 SIGNAL_NAMES = (
@@ -270,7 +271,7 @@ def prepare_window_store(
             raise ValueError(f"Conflicting window cache: {destination}")
         if manifest.get("split_fingerprint") != split_fingerprint:
             raise ValueError(f"Conflicting split for window cache: {destination}")
-        return destination, manifest
+        return destination, {**manifest, "cache_reused_this_invocation": True}
 
     folds = _folds(split_path, config["split_version"])
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -280,6 +281,7 @@ def prepare_window_store(
     window_count = 0
     skipped_short = 0
     event_count = 0
+    phases = PhaseTimer()
     text_dtype = h5py.string_dtype(encoding="utf-8")
     with h5py.File(temporary, "w", libver=("earliest", "v114")) as handle:
         handle.attrs.update(
@@ -346,58 +348,40 @@ def prepare_window_store(
                 ("position_label", "i1"),
             )
         }
-        for recording in iter_recordings(processed_root):
+        recordings = phases.iterate(
+            "source_hdf5_read_seconds", iter_recordings(processed_root)
+        )
+        for recording in recordings:
             fold_key = (recording.dataset_id, recording.participant_id)
             if fold_key not in folds:
                 raise ValueError(f"Missing participant fold for {fold_key}")
-            raw_windows, starts = _windows(
-                recording.values, config["window_samples"], config["stride_samples"]
-            )
-            if not len(raw_windows):
-                skipped_short += 1
-                continue
-            ends = starts + config["window_samples"]
-            temporal = np.full(len(starts), -1, dtype=np.int8)
-            keep = np.ones(len(starts), dtype=np.bool_)
-            if recording.supervision_kind == "temporal":
-                temporal, keep, fall_intervals = segment_decision_time_labels(
-                    starts, ends, recording.annotations
+            with phases.track("window_generation_seconds"):
+                raw_windows, starts = _windows(
+                    recording.values, config["window_samples"], config["stride_samples"]
                 )
-                event_count += len(fall_intervals)
-            elif not recording.is_fall:
-                temporal[:] = 0
-            raw_windows = raw_windows[keep]
-            starts = starts[keep]
-            ends = ends[keep]
-            temporal = temporal[keep]
             if not len(raw_windows):
                 skipped_short += 1
                 continue
-            for name, value in (
-                ("dataset_id", recording.dataset_id),
-                ("participant_id", recording.participant_id),
-                ("recording_id", recording.recording_id),
-                ("body_location", recording.body_location),
-                ("activity", recording.activity),
-                ("is_fall", recording.is_fall),
-                ("fold_id", folds[fold_key]),
-                (
-                    "event_onset_sample",
-                    -1.0
-                    if recording.fall_event is None
-                    else recording.fall_event.onset_time_s * config["sampling_rate_hz"],
-                ),
-                (
-                    "event_impact_sample",
-                    -1.0
-                    if recording.fall_event is None
-                    else recording.fall_event.impact_time_s * config["sampling_rate_hz"],
-                ),
-            ):
-                _append(sequences[name], np.asarray([value]))
-            features = extract_window_features(raw_windows, config["sampling_rate_hz"])
-            _append(raw_dataset, raw_windows)
-            _append(feature_dataset, features)
+            with phases.track("window_label_seconds"):
+                ends = starts + config["window_samples"]
+                temporal = np.full(len(starts), -1, dtype=np.int8)
+                keep = np.ones(len(starts), dtype=np.bool_)
+                if recording.supervision_kind == "temporal":
+                    temporal, keep, fall_intervals = segment_decision_time_labels(
+                        starts, ends, recording.annotations
+                    )
+                    event_count += len(fall_intervals)
+                elif not recording.is_fall:
+                    temporal[:] = 0
+                raw_windows = raw_windows[keep]
+                starts = starts[keep]
+                ends = ends[keep]
+                temporal = temporal[keep]
+            if not len(raw_windows):
+                skipped_short += 1
+                continue
+            with phases.track("feature_extraction_seconds"):
+                features = extract_window_features(raw_windows, config["sampling_rate_hz"])
             position = np.full(len(starts), -1, dtype=np.int8)
             if recording.body_location == "chest":
                 position[:] = 0
@@ -412,11 +396,41 @@ def prepare_window_store(
                 "temporal_label": temporal,
                 "position_label": position,
             }
-            for name, array in values.items():
-                _append(scalar_datasets[name], array)
+            with phases.track("cache_hdf5_write_seconds"):
+                for name, value in (
+                    ("dataset_id", recording.dataset_id),
+                    ("participant_id", recording.participant_id),
+                    ("recording_id", recording.recording_id),
+                    ("body_location", recording.body_location),
+                    ("activity", recording.activity),
+                    ("is_fall", recording.is_fall),
+                    ("fold_id", folds[fold_key]),
+                    (
+                        "event_onset_sample",
+                        -1.0
+                        if recording.fall_event is None
+                        else recording.fall_event.onset_time_s * config["sampling_rate_hz"],
+                    ),
+                    (
+                        "event_impact_sample",
+                        -1.0
+                        if recording.fall_event is None
+                        else recording.fall_event.impact_time_s * config["sampling_rate_hz"],
+                    ),
+                ):
+                    _append(sequences[name], np.asarray([value]))
+                _append(raw_dataset, raw_windows)
+                _append(feature_dataset, features)
+                for name, array in values.items():
+                    _append(scalar_datasets[name], array)
             sequence_count += 1
             window_count += len(starts)
 
+        build_seconds = time.perf_counter() - started
+        phase_seconds = phases.to_dict()
+        phase_seconds["container_overhead_seconds"] = max(
+            0.0, build_seconds - sum(phase_seconds.values())
+        )
         manifest = {
             "window_schema_version": schema,
             "feature_schema_version": config["feature_schema_version"],
@@ -435,12 +449,13 @@ def prepare_window_store(
             "features": len(FEATURE_NAMES),
             "events": event_count,
             "skipped_short_sequences": skipped_short,
-            "build_seconds": time.perf_counter() - started,
+            "build_seconds": build_seconds,
+            "build_phase_seconds": phase_seconds,
         }
         handle.attrs["manifest_json"] = json.dumps(manifest, sort_keys=True)
         handle.flush()
     os.replace(temporary, destination)
-    return destination, manifest
+    return destination, {**manifest, "cache_reused_this_invocation": False}
 
 
 @dataclass(frozen=True, slots=True)

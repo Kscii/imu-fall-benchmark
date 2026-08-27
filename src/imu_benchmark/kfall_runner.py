@@ -23,7 +23,7 @@ from sklearn.metrics import (
 )
 
 from .data import WindowStore, load_window_store, prepare_window_store
-from .device import GpuMemoryMonitor
+from .device import GpuMemoryMonitor, NvidiaSmiMonitor
 from .evaluation import best_threshold, false_positive_windows_per_hour
 from .kfall_data import (
     KFallWindowStore,
@@ -31,6 +31,13 @@ from .kfall_data import (
     prepare_kfall_window_store,
 )
 from .models import release_gpu_memory
+from .performance import (
+    PERFORMANCE_SCHEMA_VERSION,
+    PhaseTimer,
+    build_performance_report,
+    process_delta,
+    process_snapshot,
+)
 from .runner import binary_metrics
 from .sequence_models import (
     TorchSequenceAdapter,
@@ -54,6 +61,7 @@ def _registry_hash(config: dict[str, Any]) -> str:
     payload = {
         "config": config,
         "models": {model: MODEL_SPECS[model].to_dict() for model in KFALL_MODELS},
+        "performance_schema_version": PERFORMANCE_SCHEMA_VERSION,
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -248,7 +256,11 @@ def _run_job(
     run_root: Path,
     registry_hash: str,
     resume: bool,
+    telemetry: NvidiaSmiMonitor | None = None,
 ) -> dict[str, Any]:
+    job_started = time.perf_counter()
+    process_started = process_snapshot()
+    invocation_phases = PhaseTimer()
     profile = config["profiles"][profile_name]
     training_fingerprint = training_store.manifest["data_split_fingerprint"]
     external_fingerprint = external_store.manifest["data_split_fingerprint"]
@@ -269,67 +281,96 @@ def _run_job(
         job,
     )
     if resume and checkpoint.exists():
-        result = _load_checkpoint(checkpoint)
+        with invocation_phases.track("checkpoint_read_seconds"):
+            result = _load_checkpoint(checkpoint)
         if result["metadata"].get("job_hash") == expected_hash:
             if len(result["external_window_scores"]) != external_store.size:
                 raise ValueError(f"Invalid external score count in {checkpoint}")
-            return {"status": "cached", "path": str(checkpoint), **result}
+            job_stopped = time.perf_counter()
+            return {
+                "status": "cached",
+                "path": str(checkpoint),
+                **result,
+                "invocation_performance": {
+                    "wall_seconds": job_stopped - job_started,
+                    "phase_seconds": invocation_phases.to_dict(),
+                    "process_usage": process_delta(process_started, process_snapshot()),
+                    "gpu_telemetry": (
+                        telemetry.summary(job_started, job_stopped)
+                        if telemetry is not None
+                        else {"status": "unavailable", "reason": "monitor_not_started"}
+                    ),
+                },
+            }
 
-    splits = _training_splits(
-        training_store,
-        job,
-        profile=profile,
-        seed=int(config["random_seed"]),
-    )
+    job_phases = PhaseTimer()
+    with job_phases.track("split_selection_seconds"):
+        splits = _training_splits(
+            training_store,
+            job,
+            profile=profile,
+            seed=int(config["random_seed"]),
+        )
     monitor = GpuMemoryMonitor().start() if job.model_id != "threshold_impact" else None
     adapter: TorchSequenceAdapter | None = None
-    started = time.perf_counter()
+    invocation_performance: dict[str, Any] = {}
     try:
-        validation_values = training_store.load("raw", splits["validation"])
+        with job_phases.track("validation_hdf5_load_seconds"):
+            validation_values = training_store.load("raw", splits["validation"])
         validation_sequence_index = training_store.sequence_index[splits["validation"]]
         if job.model_id == "threshold_impact":
-            validation_window_scores = threshold_impact_scores(validation_values)
-            external_window_scores = threshold_impact_scores(external_values)
-            fit_seconds = 0.0
+            with job_phases.track("validation_inference_seconds"):
+                validation_window_scores = threshold_impact_scores(validation_values)
+            with job_phases.track("external_inference_seconds"):
+                external_window_scores = threshold_impact_scores(external_values)
             model_size = 0
             strict_cuda = False
             best_epoch = None
         else:
-            train_values = training_store.load("raw", splits["train"])
-            adapter = TorchSequenceAdapter(
-                job.model_id,
-                max_epochs=int(profile["max_epochs"]),
-                patience=int(profile["patience"]),
-                top_fraction=float(config["mil_top_fraction"]),
-                random_seed=int(config["random_seed"]),
-            )
-            fit_started = time.perf_counter()
-            adapter.fit_mil(
-                train_values,
-                training_store.sequence_index[splits["train"]],
-                _bag_labels(training_store, splits["train"]),
-                validation_values,
-                validation_sequence_index,
-                _bag_labels(training_store, splits["validation"]),
-            )
-            fit_seconds = time.perf_counter() - fit_started
-            validation_window_scores = adapter.predict_proba(validation_values)
-            external_window_scores = adapter.predict_proba(external_values)
+            with job_phases.track("train_hdf5_load_seconds"):
+                train_values = training_store.load("raw", splits["train"])
+            with job_phases.track("model_setup_seconds"):
+                adapter = TorchSequenceAdapter(
+                    job.model_id,
+                    max_epochs=int(profile["max_epochs"]),
+                    patience=int(profile["patience"]),
+                    top_fraction=float(config["mil_top_fraction"]),
+                    random_seed=int(config["random_seed"]),
+                )
+            with job_phases.track("model_fit_seconds"):
+                adapter.fit_mil(
+                    train_values,
+                    training_store.sequence_index[splits["train"]],
+                    _bag_labels(training_store, splits["train"]),
+                    validation_values,
+                    validation_sequence_index,
+                    _bag_labels(training_store, splits["validation"]),
+                )
+            with job_phases.track("validation_inference_seconds"):
+                validation_window_scores = adapter.predict_proba(validation_values)
+            with job_phases.track("external_inference_seconds"):
+                external_window_scores = adapter.predict_proba(external_values)
             adapter.assert_cuda()
-            model_size = adapter.serialized_size()
+            with job_phases.track("model_size_probe_seconds"):
+                model_size = adapter.serialized_size()
             strict_cuda = True
             best_epoch = adapter.best_epoch
 
-        validation_sequence_ids, validation_bag_scores = aggregate_bag_scores(
-            validation_window_scores,
-            validation_sequence_index,
-            float(config["mil_top_fraction"]),
-        )
-        validation_labels = training_store.sequence_is_fall[validation_sequence_ids].astype(np.int8)
-        threshold, validation_bacc, validation_mcc = best_threshold(
-            validation_labels, validation_bag_scores
-        )
+        with job_phases.track("evaluation_seconds"):
+            validation_sequence_ids, validation_bag_scores = aggregate_bag_scores(
+                validation_window_scores,
+                validation_sequence_index,
+                float(config["mil_top_fraction"]),
+            )
+            validation_labels = training_store.sequence_is_fall[validation_sequence_ids].astype(
+                np.int8
+            )
+            threshold, validation_bacc, validation_mcc = best_threshold(
+                validation_labels, validation_bag_scores
+            )
         peak_bytes = monitor.stop() if monitor is not None else 0
+        fit_seconds = job_phases.seconds.get("model_fit_seconds", 0.0)
+        core_stopped = time.perf_counter()
         metadata = {
             "job": asdict(job),
             "job_hash": expected_hash,
@@ -339,10 +380,14 @@ def _run_job(
             "validation_balanced_accuracy": validation_bacc,
             "validation_mcc": validation_mcc,
             "fit_seconds": fit_seconds,
-            "total_seconds": time.perf_counter() - started,
+            "total_seconds": core_stopped - job_started,
             "best_epoch": best_epoch,
             "model_size_bytes": model_size,
             "gpu_peak_used_bytes": peak_bytes,
+            "gpu_used_bytes_at_start": monitor.start_used_bytes if monitor is not None else 0,
+            "gpu_peak_increment_bytes": (
+                max(0, peak_bytes - monitor.start_used_bytes) if monitor is not None else 0
+            ),
             "strict_cuda_verified": strict_cuda,
             "train_windows": len(splits["train"]),
             "validation_windows": len(splits["validation"]),
@@ -352,18 +397,43 @@ def _run_job(
             "external_fingerprint": external_fingerprint,
             "external_windows": external_store.size,
             "data_quality_status": config["data_quality_status"],
+            "performance": {
+                "schema_version": PERFORMANCE_SCHEMA_VERSION,
+                "phase_seconds": job_phases.to_dict(),
+            },
         }
         payload = {
             "metadata": metadata,
             "external_window_scores": external_window_scores,
         }
-        _write_checkpoint(checkpoint, payload)
-        return {"status": "computed", "path": str(checkpoint), **payload}
+        with invocation_phases.track("checkpoint_write_seconds"):
+            _write_checkpoint(checkpoint, payload)
+        result = {
+            "status": "computed",
+            "path": str(checkpoint),
+            **payload,
+            "invocation_performance": invocation_performance,
+        }
+        return result
     finally:
         if monitor is not None:
             monitor.stop()
         adapter = None
-        release_gpu_memory()
+        with invocation_phases.track("gpu_cleanup_seconds"):
+            release_gpu_memory()
+        job_stopped = time.perf_counter()
+        invocation_performance.update(
+            {
+                "wall_seconds": job_stopped - job_started,
+                "phase_seconds": invocation_phases.to_dict(),
+                "process_usage": process_delta(process_started, process_snapshot()),
+                "gpu_telemetry": (
+                    telemetry.summary(job_started, job_stopped)
+                    if telemetry is not None
+                    else {"status": "unavailable", "reason": "monitor_not_started"}
+                ),
+            }
+        )
 
 
 def _classification_metrics_from_predictions(
@@ -621,6 +691,7 @@ def _write_report(
     ensemble_scores: dict[tuple[str, str], np.ndarray],
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    performance_path = summary.get("performance_path", str(output_dir / "performance.json"))
     _write_csv(output_dir / "metrics_recording_zero_shot.csv", zero_shot_rows)
     _write_csv(output_dir / "metrics_temporal_calibrated.csv", calibrated_rows)
     _write_csv(output_dir / "event_metrics.csv", event_rows)
@@ -636,6 +707,7 @@ def _write_report(
         f"- Status: `{summary['status']}`",
         f"- Jobs: {summary['completed_jobs']}/{summary['scheduled_jobs']}",
         f"- Data quality: `{summary['data_quality_status']}`",
+        f"- Performance profile: `{performance_path}`",
         "- KFall was not used for model weights, normalisation, or early stopping.",
         "- Positive window policy: decision time within the fall activity segment, "
         "from onset through the adapter-provided impact-plus-one-second tail.",
@@ -724,16 +796,23 @@ def run_kfall_experiment(
     source: dict[str, Any] | None,
     warnings: list[str] | None,
 ) -> dict[str, Any]:
+    invocation_started = time.perf_counter()
+    invocation_process_started = process_snapshot()
+    invocation_phases = PhaseTimer()
     profile = config["profiles"][profile_name]
-    training_path, training_manifest = prepare_window_store(
-        project_root=project_root, cache_root=cache_root, config=config
-    )
-    external_path, external_manifest = prepare_kfall_window_store(
-        project_root=project_root, cache_root=cache_root, config=config
-    )
-    training_store = load_window_store(training_path)
-    external_store = load_kfall_window_store(external_path)
-    external_values = external_store.load_raw()
+    with invocation_phases.track("training_cache_prepare_seconds"):
+        training_path, training_manifest = prepare_window_store(
+            project_root=project_root, cache_root=cache_root, config=config
+        )
+    with invocation_phases.track("external_cache_prepare_seconds"):
+        external_path, external_manifest = prepare_kfall_window_store(
+            project_root=project_root, cache_root=cache_root, config=config
+        )
+    with invocation_phases.track("store_metadata_load_seconds"):
+        training_store = load_window_store(training_path)
+        external_store = load_kfall_window_store(external_path)
+    with invocation_phases.track("external_hdf5_load_seconds"):
+        external_values = external_store.load_raw()
     jobs = build_jobs(
         suites=KFALL_SUITES,
         models=KFALL_MODELS,
@@ -742,65 +821,75 @@ def run_kfall_experiment(
     registry_hash = _registry_hash(config)
     status_path = run_root / profile_name / "status.json"
     started = time.perf_counter()
+    telemetry = NvidiaSmiMonitor().start()
     results: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
-    for index, job in enumerate(jobs, start=1):
-        elapsed = time.perf_counter() - started
-        if elapsed >= float(profile["runtime_budget_seconds"]):
-            failures.append(
-                {
-                    "status": "not_started",
-                    "reason": "runtime_budget_exhausted",
-                    "job": job.to_dict(),
-                }
-            )
-            continue
-        _atomic_json(
-            status_path,
-            {
-                "state": "running",
-                "profile": profile_name,
-                "progress": f"{index - 1}/{len(jobs)}",
-                "current_job": job.to_dict(),
-                "elapsed_seconds": elapsed,
-            },
-        )
-        try:
-            result = _run_job(
-                training_store=training_store,
-                external_store=external_store,
-                external_values=external_values,
-                job=job,
-                config=config,
-                profile_name=profile_name,
-                run_root=run_root,
-                registry_hash=registry_hash,
-                resume=resume,
-            )
-        except Exception as error:
-            result = {
-                "status": "failed",
-                "reason": f"{type(error).__name__}: {error}",
-                "job": job.to_dict(),
-            }
-        if result["status"] in {"computed", "cached"}:
-            results.append(result)
-        else:
-            failures.append(result)
-        print(
-            json.dumps(
-                {
-                    "progress": f"{index}/{len(jobs)}",
-                    "run_key": job.run_key,
-                    "status": result["status"],
-                    "elapsed_seconds": round(time.perf_counter() - started, 1),
-                }
-            ),
-            flush=True,
-        )
+    try:
+        with invocation_phases.track("job_execution_seconds"):
+            for index, job in enumerate(jobs, start=1):
+                elapsed = time.perf_counter() - started
+                if elapsed >= float(profile["runtime_budget_seconds"]):
+                    failures.append(
+                        {
+                            "status": "not_started",
+                            "reason": "runtime_budget_exhausted",
+                            "job": job.to_dict(),
+                        }
+                    )
+                    continue
+                _atomic_json(
+                    status_path,
+                    {
+                        "state": "running",
+                        "profile": profile_name,
+                        "progress": f"{index - 1}/{len(jobs)}",
+                        "current_job": job.to_dict(),
+                        "elapsed_seconds": elapsed,
+                    },
+                )
+                try:
+                    result = _run_job(
+                        training_store=training_store,
+                        external_store=external_store,
+                        external_values=external_values,
+                        job=job,
+                        config=config,
+                        profile_name=profile_name,
+                        run_root=run_root,
+                        registry_hash=registry_hash,
+                        resume=resume,
+                        telemetry=telemetry,
+                    )
+                except Exception as error:
+                    result = {
+                        "status": "failed",
+                        "reason": f"{type(error).__name__}: {error}",
+                        "job": job.to_dict(),
+                    }
+                if result["status"] in {"computed", "cached"}:
+                    results.append(result)
+                else:
+                    failures.append(result)
+                print(
+                    json.dumps(
+                        {
+                            "progress": f"{index}/{len(jobs)}",
+                            "run_key": job.run_key,
+                            "status": result["status"],
+                            "elapsed_seconds": round(time.perf_counter() - started, 1),
+                        }
+                    ),
+                    flush=True,
+                )
+    finally:
+        telemetry.stop()
     elapsed = time.perf_counter() - started
-    zero_shot = _zero_shot_rows(results, external_store, float(config["mil_top_fraction"]))
-    calibrated, events, ensemble_scores = _calibrated_rows(results, external_store)
+    telemetry_summary = telemetry.summary(started, time.perf_counter())
+    with invocation_phases.track("result_aggregation_seconds"):
+        zero_shot = _zero_shot_rows(
+            results, external_store, float(config["mil_top_fraction"])
+        )
+        calibrated, events, ensemble_scores = _calibrated_rows(results, external_store)
     summary = {
         "status": "PASS" if not failures else "PARTIAL",
         "experiment_version": config["experiment_version"],
@@ -836,7 +925,24 @@ def run_kfall_experiment(
         "warnings": list(warnings or []),
     }
     output_dir = _report_paths(run_root, training_store, external_store, profile_name)
-    _write_report(output_dir, summary, zero_shot, calibrated, events, ensemble_scores)
+    performance_path = output_dir / "performance.json"
+    summary["performance_schema_version"] = PERFORMANCE_SCHEMA_VERSION
+    summary["performance_path"] = str(performance_path)
+    with invocation_phases.track("report_write_seconds"):
+        _write_report(output_dir, summary, zero_shot, calibrated, events, ensemble_scores)
+    performance = build_performance_report(
+        invocation_phases=invocation_phases.to_dict(),
+        results=results,
+        process_usage=process_delta(invocation_process_started, process_snapshot()),
+        gpu_telemetry=telemetry_summary,
+        cache_manifests={
+            "training": training_manifest,
+            "external": external_manifest,
+        },
+    )
+    performance["invocation_wall_seconds"] = time.perf_counter() - invocation_started
+    _atomic_json(performance_path, performance)
+    _atomic_json(output_dir / "run_manifest.json", summary)
     _atomic_json(
         status_path,
         {

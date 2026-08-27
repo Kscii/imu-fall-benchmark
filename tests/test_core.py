@@ -14,7 +14,7 @@ from imu_benchmark.data import (
     prepare_window_store,
 )
 from imu_benchmark.dataset import Annotation, validate_data
-from imu_benchmark.device import CudaUnavailable
+from imu_benchmark.device import CudaUnavailable, _parse_nvidia_smi_line
 from imu_benchmark.evaluation import best_threshold
 from imu_benchmark.kfall_data import (
     load_kfall_config,
@@ -22,6 +22,13 @@ from imu_benchmark.kfall_data import (
     prepare_kfall_window_store,
 )
 from imu_benchmark.kfall_runner import _training_splits, plan_kfall_experiment
+from imu_benchmark.performance import (
+    PERFORMANCE_SCHEMA_VERSION,
+    PhaseTimer,
+    aggregate_job_performance,
+    process_delta,
+    process_snapshot,
+)
 from imu_benchmark.protocol import segment_decision_time_labels
 from imu_benchmark.runner import plan_experiment
 from imu_benchmark.runtime import (
@@ -196,3 +203,74 @@ def test_invalid_or_missing_source_is_explicit(tmp_path: Path) -> None:
     source, warnings = source_provenance(tmp_path)
     assert source["kind"] == "unknown"
     assert warnings == ["source_manifest_invalid", "source_unknown"]
+
+
+def test_performance_phases_and_process_usage_are_machine_readable() -> None:
+    started = process_snapshot()
+    phases = PhaseTimer()
+    with phases.track("small_phase_seconds"):
+        sum(range(100))
+    stopped = process_snapshot()
+    assert phases.to_dict()["small_phase_seconds"] >= 0.0
+    usage = process_delta(started, stopped)
+    assert usage["user_seconds"] >= 0.0
+    assert usage["system_seconds"] >= 0.0
+    assert usage["max_rss_bytes"] > 0
+
+
+def test_job_performance_aggregation_preserves_model_and_phase() -> None:
+    results = [
+        {
+            "status": "computed",
+            "metadata": {
+                "job": {"model_id": "torch_1d_cnn"},
+                "performance": {
+                    "schema_version": PERFORMANCE_SCHEMA_VERSION,
+                    "phase_seconds": {
+                        "model_fit_seconds": 2.0,
+                        "test_inference_seconds": 0.5,
+                    },
+                },
+            },
+            "invocation_performance": {
+                "phase_seconds": {"checkpoint_write_seconds": 0.25}
+            },
+        },
+        {
+            "status": "cached",
+            "metadata": {
+                "job": {"model_id": "torch_1d_cnn"},
+                "performance": {
+                    "schema_version": PERFORMANCE_SCHEMA_VERSION,
+                    "phase_seconds": {"model_fit_seconds": 1.0},
+                },
+            },
+            "invocation_performance": {
+                "phase_seconds": {"checkpoint_read_seconds": 0.1}
+            },
+        },
+    ]
+    result = aggregate_job_performance(results)
+    assert result["computed_jobs"] == 1
+    assert result["cached_jobs"] == 1
+    assert result["bottlenecks"][0] == {
+        "phase": "model_fit_seconds",
+        "total_seconds": 3.0,
+    }
+    assert result["by_model"]["torch_1d_cnn"]["checkpoint_write_seconds"][
+        "total_seconds"
+    ] == pytest.approx(0.25)
+
+
+def test_nvidia_smi_telemetry_parser_handles_optional_power() -> None:
+    parsed = _parse_nvidia_smi_line("87, 42, 3198, 188.5")
+    assert parsed == {
+        "gpu_utilization_percent": 87.0,
+        "memory_utilization_percent": 42.0,
+        "memory_used_mib": 3198.0,
+        "power_watts": 188.5,
+    }
+    parsed = _parse_nvidia_smi_line("3, 1, 1024, [N/A]")
+    assert parsed is not None
+    assert parsed["power_watts"] is None
+    assert _parse_nvidia_smi_line("malformed") is None
