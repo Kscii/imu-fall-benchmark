@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
+from imu_benchmark import runtime
 from imu_benchmark.data import (
     extract_window_features,
     load_config,
@@ -11,6 +14,7 @@ from imu_benchmark.data import (
     prepare_window_store,
 )
 from imu_benchmark.dataset import validate_data
+from imu_benchmark.device import CudaUnavailable
 from imu_benchmark.evaluation import best_threshold
 from imu_benchmark.kfall_data import (
     load_kfall_config,
@@ -20,9 +24,15 @@ from imu_benchmark.kfall_data import (
 )
 from imu_benchmark.kfall_runner import _training_splits, plan_kfall_experiment
 from imu_benchmark.runner import plan_experiment
+from imu_benchmark.runtime import (
+    require_compute_runtime,
+    resolve_work_paths,
+    source_provenance,
+)
 from imu_benchmark.specs import MODEL_IDS, SUITES, build_jobs
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CACHE_ROOT = resolve_work_paths().cache
 
 
 def test_distributed_data_and_split_validate() -> None:
@@ -92,7 +102,7 @@ def test_kfall_workload_and_cache_contract() -> None:
     assert evaluate["scheduled_jobs"] == 40
     path, manifest = prepare_kfall_window_store(
         project_root=PROJECT_ROOT,
-        cache_root=PROJECT_ROOT / "cache",
+        cache_root=CACHE_ROOT,
         config=config,
     )
     store = load_kfall_window_store(path)
@@ -107,7 +117,7 @@ def test_kfall_training_fold_is_participant_disjoint() -> None:
     config = load_kfall_config(PROJECT_ROOT / "configs/kfall_external_v1_provisional.json")
     path, _manifest = prepare_window_store(
         project_root=PROJECT_ROOT,
-        cache_root=PROJECT_ROOT / "cache",
+        cache_root=CACHE_ROOT,
         config=config,
     )
     store = load_window_store(path)
@@ -123,3 +133,59 @@ def test_kfall_training_fold_is_participant_disjoint() -> None:
     train = set(store.window_participants()[splits["train"]])
     validation = set(store.window_participants()[splits["validation"]])
     assert train.isdisjoint(validation)
+
+
+def test_work_paths_use_visible_default_and_absolute_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("IMU_BENCH_WORK_ROOT", raising=False)
+    default = resolve_work_paths()
+    assert default.root == Path.home() / "imu-fall-work"
+    monkeypatch.setenv("IMU_BENCH_WORK_ROOT", str(tmp_path))
+    overridden = resolve_work_paths()
+    assert overridden.root == tmp_path
+    assert overridden.cache == tmp_path / "cache"
+    assert overridden.runs == tmp_path / "runs"
+    monkeypatch.setenv("IMU_BENCH_WORK_ROOT", "relative")
+    with pytest.raises(ValueError, match="absolute"):
+        resolve_work_paths()
+
+
+def test_only_compute_commands_require_wsl2(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime, "is_wsl2", lambda: False)
+    require_compute_runtime("validate-data", PROJECT_ROOT)
+    require_compute_runtime("plan", PROJECT_ROOT)
+    require_compute_runtime("report", PROJECT_ROOT)
+    with pytest.raises(CudaUnavailable, match="requires WSL2"):
+        require_compute_runtime("doctor", PROJECT_ROOT)
+    with pytest.raises(CudaUnavailable, match="requires WSL2"):
+        require_compute_runtime("smoke", PROJECT_ROOT)
+
+
+def test_snapshot_source_provenance_and_dirty_warning(tmp_path: Path) -> None:
+    payload = {
+        "schema_version": 1,
+        "kind": "snapshot",
+        "commit": "abc123",
+        "dirty": True,
+        "snapshot_sha256": "a" * 64,
+    }
+    (tmp_path / ".imu-source.json").write_text(json.dumps(payload), encoding="utf-8")
+    source, warnings = source_provenance(tmp_path)
+    assert source == {
+        "kind": "snapshot",
+        "commit": "abc123",
+        "dirty": True,
+        "snapshot_sha256": "a" * 64,
+    }
+    assert warnings == ["source_tree_dirty"]
+
+
+def test_invalid_or_missing_source_is_explicit(tmp_path: Path) -> None:
+    source, warnings = source_provenance(tmp_path)
+    assert source["kind"] == "unknown"
+    assert warnings == ["source_unknown"]
+    (tmp_path / ".imu-source.json").write_text("{}", encoding="utf-8")
+    source, warnings = source_provenance(tmp_path)
+    assert source["kind"] == "unknown"
+    assert warnings == ["source_manifest_invalid", "source_unknown"]
