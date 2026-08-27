@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import platform
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -12,25 +13,28 @@ import sklearn
 
 from .device import cuda_environment
 from .models import create_adapter, release_gpu_memory
+from .runtime import is_wsl2, repository_is_on_linux_filesystem
 from .specs import MODEL_SPECS, TABULAR_MODEL_IDS
 
-
-def _is_wsl() -> bool:
-    version_path = Path("/proc/version")
-    if not version_path.is_file():
-        return False
-    return "microsoft" in version_path.read_text(encoding="utf-8", errors="ignore").lower()
+MINIMUM_RUNTIME_FREE_BYTES = 10 * 1024**3
 
 
-def run_doctor(*, random_seed: int) -> dict[str, Any]:
+def run_doctor(*, random_seed: int, project_root: Path, work_root: Path) -> dict[str, Any]:
+    work_root.mkdir(parents=True, exist_ok=True)
+    disk = shutil.disk_usage(work_root)
+    if disk.free < MINIMUM_RUNTIME_FREE_BYTES:
+        raise ValueError("At least 10 GiB free space is required under the work root")
     environment = {
         **cuda_environment(),
         "python": sys.version.split()[0],
         "numpy": np.__version__,
         "h5py": h5py.__version__,
         "scikit_learn": sklearn.__version__,
-        "is_wsl": _is_wsl(),
+        "is_wsl2": is_wsl2(),
         "machine": platform.machine(),
+        "repository_on_wsl_linux_filesystem": repository_is_on_linux_filesystem(project_root),
+        "work_root": str(work_root),
+        "work_root_free_bytes": int(disk.free),
     }
     rng = np.random.default_rng(random_seed)
     features = rng.normal(size=(64, 8)).astype(np.float32)

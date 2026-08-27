@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+WORK_ROOT="${IMU_BENCH_WORK_ROOT:-${HOME}/imu-fall-work}"
+MINIFORGE_VERSION="26.3.2-2"
+MINIFORGE_SHA256="42260ffe3830fb953d5eee1bbb32229ff06aa7c3833c1ed7a9a0420a95685d94"
+MINIFORGE_URL="https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-${MINIFORGE_VERSION}-Linux-x86_64.sh"
+SETUP_SCHEMA="imu-benchmark-wsl-environment-v1"
+MIN_FREE_KIB=$((25 * 1024 * 1024))
+
+if [[ -d /usr/lib/wsl/lib ]]; then
+  export PATH="/usr/lib/wsl/lib:${PATH}"
+fi
+
+usage() {
+  cat <<'EOF'
+Usage: ./benchmark COMMAND [ARGS]
+
+Main commands:
+  setup                  Create or reuse the WSL CUDA environment
+  doctor                 Verify WSL2, CUDA, paths, and GPU model backends
+  test                   Run Ruff and pytest in the project environment
+  validate-data          Validate Git LFS data, HDF5 schemas, and folds
+  prepare                Build or reuse the external window cache
+  smoke                  Run the fixed 22-job smoke profile
+  reproduce --resume     Run the fixed 110-job reproduction
+
+All other arguments are forwarded to the advanced imu-bench CLI.
+EOF
+}
+
+is_wsl2() {
+  grep -Eqi 'microsoft-standard-wsl2' /proc/sys/kernel/osrelease 2>/dev/null
+}
+
+require_wsl2() {
+  if ! is_wsl2; then
+    echo "ERROR: this command is supported only inside WSL2." >&2
+    exit 1
+  fi
+  case "${REPO_ROOT}" in
+    /mnt/*)
+      echo "ERROR: keep the repository in the WSL Linux filesystem, not under /mnt/." >&2
+      exit 1
+      ;;
+  esac
+}
+
+require_absolute_work_root() {
+  case "${WORK_ROOT}" in
+    /*) ;;
+    *)
+      echo "ERROR: IMU_BENCH_WORK_ROOT must be an absolute path." >&2
+      exit 1
+      ;;
+  esac
+}
+
+dependency_digest() {
+  {
+    printf '%s\n' "${SETUP_SCHEMA}"
+    sha256sum "${REPO_ROOT}/environment.yml"
+    sha256sum "${REPO_ROOT}/requirements-torch-cu129.txt"
+  } | sha256sum | cut -c1-16
+}
+
+project_miniforge() {
+  printf '%s/toolchains/miniforge-%s/bin/conda\n' "${WORK_ROOT}" "${MINIFORGE_VERSION}"
+}
+
+find_conda() {
+  if [[ -n "${IMU_BENCH_CONDA_EXE:-}" ]]; then
+    printf '%s\n' "${IMU_BENCH_CONDA_EXE}"
+  elif [[ -x "${HOME}/miniforge3/bin/conda" ]]; then
+    printf '%s\n' "${HOME}/miniforge3/bin/conda"
+  else
+    project_miniforge
+  fi
+}
+
+environment_path() {
+  printf '%s/envs/%s\n' "${WORK_ROOT}" "$(dependency_digest)"
+}
+
+install_miniforge() {
+  local destination installer temporary
+  destination="${WORK_ROOT}/toolchains/miniforge-${MINIFORGE_VERSION}"
+  if [[ -x "${destination}/bin/conda" ]]; then
+    return
+  fi
+  command -v curl >/dev/null || {
+    echo "ERROR: curl is required. Install it with: sudo apt install --yes curl ca-certificates" >&2
+    exit 1
+  }
+  temporary="$(mktemp -d)"
+  installer="${temporary}/Miniforge3.sh"
+  trap 'rm -rf -- "${temporary}"' RETURN
+  curl --fail --location --retry 3 --output "${installer}" "${MINIFORGE_URL}"
+  printf '%s  %s\n' "${MINIFORGE_SHA256}" "${installer}" | sha256sum --check --status
+  mkdir -p -- "$(dirname -- "${destination}")"
+  bash "${installer}" -b -p "${destination}"
+  trap - RETURN
+  rm -rf -- "${temporary}"
+}
+
+check_distribution_data() {
+  if git -C "${REPO_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if ! command -v git-lfs >/dev/null; then
+      cat >&2 <<'EOF'
+ERROR: Git LFS is required for a cloned repository. Run:
+  sudo apt update
+  sudo apt install --yes git-lfs
+Then rerun ./benchmark setup.
+EOF
+      exit 1
+    fi
+    git -C "${REPO_ROOT}" lfs install --local
+    git -C "${REPO_ROOT}" lfs pull
+    git -C "${REPO_ROOT}" lfs fsck
+  fi
+}
+
+setup_environment() {
+  local conda_exe env_path free_kib marker
+  require_wsl2
+  require_absolute_work_root
+  command -v git >/dev/null || {
+    echo "ERROR: git is required. Install it with: sudo apt install --yes git" >&2
+    exit 1
+  }
+  command -v sha256sum >/dev/null || {
+    echo "ERROR: sha256sum is required (package: coreutils)." >&2
+    exit 1
+  }
+  if ! command -v nvidia-smi >/dev/null && [[ ! -x /usr/lib/wsl/lib/nvidia-smi ]]; then
+    echo "ERROR: nvidia-smi is unavailable inside WSL2." >&2
+    exit 1
+  fi
+  check_distribution_data
+  mkdir -p -- "${WORK_ROOT}/envs" "${WORK_ROOT}/cache" "${WORK_ROOT}/runs"
+  conda_exe="$(find_conda)"
+  if [[ ! -x "${conda_exe}" ]]; then
+    free_kib="$(df -Pk "${HOME}" | awk 'NR == 2 {print $4}')"
+    if (( free_kib < MIN_FREE_KIB )); then
+      echo "ERROR: at least 25 GiB free space is required for a fresh CUDA environment." >&2
+      exit 1
+    fi
+    install_miniforge
+    conda_exe="$(project_miniforge)"
+  fi
+  env_path="$(environment_path)"
+  marker="${env_path}/.imu-benchmark-complete"
+  if [[ ! -f "${marker}" ]]; then
+    if [[ -e "${env_path}" ]]; then
+      echo "ERROR: incomplete environment exists at ${env_path}; inspect it before retrying." >&2
+      exit 1
+    fi
+    "${conda_exe}" env create --prefix "${env_path}" --file "${REPO_ROOT}/environment.yml"
+    "${conda_exe}" run --prefix "${env_path}" \
+      python -m pip install --requirement "${REPO_ROOT}/requirements-torch-cu129.txt"
+    printf '%s\n' "$(dependency_digest)" >"${marker}"
+  fi
+  PYTHONPATH="${REPO_ROOT}/src" "${conda_exe}" run --no-capture-output \
+    --prefix "${env_path}" python -m imu_benchmark.cli validate-data
+  printf 'Environment ready: %s\nWork root: %s\n' "${env_path}" "${WORK_ROOT}"
+}
+
+run_in_environment() {
+  local conda_exe env_path
+  require_absolute_work_root
+  conda_exe="$(find_conda)"
+  env_path="$(environment_path)"
+  if [[ ! -x "${conda_exe}" || ! -f "${env_path}/.imu-benchmark-complete" ]]; then
+    echo "ERROR: the project environment is missing; run ./benchmark setup in WSL2." >&2
+    exit 1
+  fi
+  PYTHONPATH="${REPO_ROOT}/src" "${conda_exe}" run --no-capture-output \
+    --prefix "${env_path}" "$@"
+}
+
+command="${1:-}"
+case "${command}" in
+  ""|-h|--help|help)
+    usage
+    ;;
+  setup)
+    shift
+    if (( $# )); then
+      echo "ERROR: setup does not accept arguments." >&2
+      exit 2
+    fi
+    setup_environment
+    ;;
+  test)
+    shift
+    if (( $# )); then
+      echo "ERROR: test does not accept arguments." >&2
+      exit 2
+    fi
+    require_wsl2
+    run_in_environment ruff check "${REPO_ROOT}"
+    run_in_environment pytest -q "${REPO_ROOT}/tests"
+    ;;
+  *)
+    if is_wsl2; then
+      run_in_environment python -m imu_benchmark.cli "$@"
+    else
+      PYTHONPATH="${REPO_ROOT}/src" "${PYTHON:-python3}" -m imu_benchmark.cli "$@"
+    fi
+    ;;
+esac

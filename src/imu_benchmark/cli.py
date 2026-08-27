@@ -17,12 +17,18 @@ from .kfall_runner import (
     run_kfall_experiment,
 )
 from .runner import plan_experiment, regenerate_report, run_experiment
+from .runtime import (
+    FORMAL_COMMANDS,
+    WorkPaths,
+    require_compute_runtime,
+    resolve_work_paths,
+    source_provenance,
+)
 from .specs import MODEL_IDS, SUITES
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs/initial_validation_recheck_v1.json"
 DEFAULT_KFALL_CONFIG = PROJECT_ROOT / "configs/kfall_external_v1_provisional.json"
-CACHE_ROOT = PROJECT_ROOT / "cache"
 
 
 def _selection(value: str | None, allowed: tuple[str, ...], name: str) -> tuple[str, ...]:
@@ -55,36 +61,62 @@ def _configured(args: argparse.Namespace) -> tuple[dict, tuple[str, ...], tuple[
     return config, suites, models
 
 
-def _run_fixed(profile: str, *, resume: bool, config_path: Path) -> dict:
+def _doctor_result(config: dict, paths: WorkPaths) -> dict:
+    source, warnings = source_provenance(PROJECT_ROOT)
+    result = run_doctor(
+        random_seed=int(config["random_seed"]),
+        project_root=PROJECT_ROOT,
+        work_root=paths.root,
+    )
+    return {**result, "paths": paths.to_dict(), "source": source, "warnings": warnings}
+
+
+def _run_fixed(
+    profile: str,
+    *,
+    resume: bool,
+    config_path: Path,
+    paths: WorkPaths,
+) -> dict:
     config = load_config(config_path.resolve())
     data_validation = validate_data(PROJECT_ROOT)
-    doctor = run_doctor(random_seed=int(config["random_seed"]))
+    doctor = _doctor_result(config, paths)
     result = run_experiment(
         project_root=PROJECT_ROOT,
-        cache_root=CACHE_ROOT,
-        run_root=PROJECT_ROOT / "runs" / str(config["experiment_version"]),
+        cache_root=paths.cache,
+        run_root=paths.runs / str(config["experiment_version"]),
         config=config,
         profile_name=profile,
         suites=SUITES,
         models=MODEL_IDS,
         resume=resume,
         environment=doctor["environment"],
+        source=doctor["source"],
+        warnings=doctor["warnings"],
     )
     return {"data_validation": data_validation, "doctor": doctor, "benchmark": result}
 
 
-def _run_kfall(profile: str, *, resume: bool, config_path: Path) -> dict:
+def _run_kfall(
+    profile: str,
+    *,
+    resume: bool,
+    config_path: Path,
+    paths: WorkPaths,
+) -> dict:
     config = load_kfall_config(config_path.resolve())
     data_validation = validate_data(PROJECT_ROOT)
-    doctor = run_doctor(random_seed=int(config["random_seed"]))
+    doctor = _doctor_result(config, paths)
     result = run_kfall_experiment(
         project_root=PROJECT_ROOT,
-        cache_root=CACHE_ROOT,
-        run_root=PROJECT_ROOT / "runs" / str(config["experiment_version"]),
+        cache_root=paths.cache,
+        run_root=paths.runs / str(config["experiment_version"]),
         config=config,
         profile_name=profile,
         resume=resume,
         environment=doctor["environment"],
+        source=doctor["source"],
+        warnings=doctor["warnings"],
     )
     return {"data_validation": data_validation, "doctor": doctor, "benchmark": result}
 
@@ -139,27 +171,42 @@ def main() -> None:
 
     args = parser.parse_args()
     try:
+        require_compute_runtime(args.command, PROJECT_ROOT)
+        paths = resolve_work_paths()
+        source, warnings = source_provenance(PROJECT_ROOT)
+        if args.command in FORMAL_COMMANDS and warnings:
+            print(
+                f"WARNING: experiment source is not clean: {', '.join(warnings)}",
+                file=sys.stderr,
+            )
         if args.command == "doctor":
             config = load_config(args.config.resolve())
-            result = run_doctor(random_seed=int(config["random_seed"]))
+            result = _doctor_result(config, paths)
         elif args.command == "validate-data":
             result = validate_data(PROJECT_ROOT)
         elif args.command == "prepare":
             config = load_config(args.config.resolve())
             validation = validate_data(PROJECT_ROOT)
             path, manifest = prepare_window_store(
-                project_root=PROJECT_ROOT, cache_root=CACHE_ROOT, config=config
+                project_root=PROJECT_ROOT, cache_root=paths.cache, config=config
             )
             result = {
                 "status": "PASS",
                 "data_validation": validation,
                 "path": str(path),
+                "paths": paths.to_dict(),
+                "source": source,
+                "warnings": warnings,
                 **manifest,
             }
         elif args.command == "smoke":
-            result = _run_fixed("smoke", resume=True, config_path=args.config)
+            result = _run_fixed(
+                "smoke", resume=True, config_path=args.config, paths=paths
+            )
         elif args.command == "reproduce":
-            result = _run_fixed("reproduce", resume=args.resume, config_path=args.config)
+            result = _run_fixed(
+                "reproduce", resume=args.resume, config_path=args.config, paths=paths
+            )
         elif args.command == "plan":
             config, suites, models = _configured(args)
             result = plan_experiment(
@@ -171,25 +218,27 @@ def main() -> None:
         elif args.command == "run":
             config, suites, models = _configured(args)
             validation = validate_data(PROJECT_ROOT)
-            doctor = run_doctor(random_seed=int(config["random_seed"]))
+            doctor = _doctor_result(config, paths)
             benchmark = run_experiment(
                 project_root=PROJECT_ROOT,
-                cache_root=CACHE_ROOT,
-                run_root=PROJECT_ROOT / "runs" / str(config["experiment_version"]),
+                cache_root=paths.cache,
+                run_root=paths.runs / str(config["experiment_version"]),
                 config=config,
                 profile_name=args.profile,
                 suites=suites,
                 models=models,
                 resume=args.resume,
                 environment=doctor["environment"],
+                source=doctor["source"],
+                warnings=doctor["warnings"],
             )
             result = {"data_validation": validation, "doctor": doctor, "benchmark": benchmark}
         elif args.command == "report":
             config, suites, models = _configured(args)
             result = regenerate_report(
                 project_root=PROJECT_ROOT,
-                cache_root=CACHE_ROOT,
-                run_root=PROJECT_ROOT / "runs" / str(config["experiment_version"]),
+                cache_root=paths.cache,
+                run_root=paths.runs / str(config["experiment_version"]),
                 config=config,
                 profile_name=args.profile,
                 suites=suites,
@@ -203,27 +252,35 @@ def main() -> None:
             validation = validate_data(PROJECT_ROOT)
             path, manifest = prepare_kfall_window_store(
                 project_root=PROJECT_ROOT,
-                cache_root=CACHE_ROOT,
+                cache_root=paths.cache,
                 config=config,
             )
             result = {
                 "status": "PASS",
                 "data_validation": validation,
                 "path": str(path),
+                "paths": paths.to_dict(),
+                "source": source,
+                "warnings": warnings,
                 **manifest,
             }
         elif args.command == "kfall-smoke":
-            result = _run_kfall("smoke", resume=True, config_path=args.kfall_config)
+            result = _run_kfall(
+                "smoke", resume=True, config_path=args.kfall_config, paths=paths
+            )
         elif args.command == "kfall-evaluate":
             result = _run_kfall(
-                "evaluate", resume=args.resume, config_path=args.kfall_config
+                "evaluate",
+                resume=args.resume,
+                config_path=args.kfall_config,
+                paths=paths,
             )
         elif args.command == "kfall-report":
             config = load_kfall_config(args.kfall_config.resolve())
             result = regenerate_kfall_report(
                 project_root=PROJECT_ROOT,
-                cache_root=CACHE_ROOT,
-                run_root=PROJECT_ROOT / "runs" / str(config["experiment_version"]),
+                cache_root=paths.cache,
+                run_root=paths.runs / str(config["experiment_version"]),
                 config=config,
                 profile_name=args.profile,
             )

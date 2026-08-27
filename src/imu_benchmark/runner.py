@@ -829,6 +829,8 @@ def run_experiment(
     models: tuple[str, ...],
     resume: bool,
     environment: dict[str, Any] | None = None,
+    source: dict[str, Any] | None = None,
+    warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     profile = config["profiles"][profile_name]
     window_path, manifest = prepare_window_store(
@@ -956,6 +958,8 @@ def run_experiment(
         "random_seed": int(config["random_seed"]),
         "determinism_policy": "fixed_seed_and_torch_deterministic_algorithms",
         "environment": environment,
+        "source": source,
+        "warnings": list(warnings or []),
         "source_balance": [
             {
                 "dataset_id": dataset_id,
@@ -1060,6 +1064,8 @@ def regenerate_report(
             "random_seed": int(config["random_seed"]),
             "determinism_policy": "fixed_seed_and_torch_deterministic_algorithms",
             "environment": None,
+            "source": None,
+            "warnings": ["source_unknown"],
             "source_balance": [],
         }
     summary["report_regenerated"] = True

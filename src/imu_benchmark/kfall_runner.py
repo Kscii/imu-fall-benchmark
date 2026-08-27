@@ -690,6 +690,8 @@ def run_kfall_experiment(
     profile_name: str,
     resume: bool,
     environment: dict[str, Any] | None,
+    source: dict[str, Any] | None,
+    warnings: list[str] | None,
 ) -> dict[str, Any]:
     profile = config["profiles"][profile_name]
     training_path, training_manifest = prepare_window_store(
@@ -799,6 +801,8 @@ def run_kfall_experiment(
         "data_quality_status": config["data_quality_status"],
         "known_limitations": list(config["known_limitations"]),
         "environment": environment,
+        "source": source,
+        "warnings": list(warnings or []),
     }
     output_dir = _report_paths(run_root, training_store, external_store, profile_name)
     _write_report(output_dir, summary, zero_shot, calibrated, events, ensemble_scores)
@@ -859,10 +863,13 @@ def regenerate_kfall_report(
     output_dir = _report_paths(run_root, training_store, external_store, profile_name)
     existing_manifest = output_dir / "run_manifest.json"
     existing_environment = None
+    existing_source = None
+    existing_warnings = ["source_unknown"]
     if existing_manifest.is_file():
-        existing_environment = json.loads(existing_manifest.read_text(encoding="utf-8")).get(
-            "environment"
-        )
+        existing = json.loads(existing_manifest.read_text(encoding="utf-8"))
+        existing_environment = existing.get("environment")
+        existing_source = existing.get("source")
+        existing_warnings = list(existing.get("warnings", []))
     summary = {
         "status": "PASS",
         "experiment_version": config["experiment_version"],
@@ -894,6 +901,8 @@ def regenerate_kfall_report(
         "data_quality_status": config["data_quality_status"],
         "known_limitations": list(config["known_limitations"]),
         "environment": existing_environment,
+        "source": existing_source,
+        "warnings": existing_warnings,
     }
     _write_report(output_dir, summary, zero_shot, calibrated, events, ensemble_scores)
     return {**summary, "output_dir": str(output_dir)}
