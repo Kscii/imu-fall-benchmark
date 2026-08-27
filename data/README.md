@@ -84,20 +84,26 @@ The benchmark does not remove gravity or rotate data into a common body coordina
 KFall is external-only and is not listed in `participant_folds_v2.csv`. Its independent
 participant assignments are in `kfall_external_folds_v1.csv`. The current adapter output is
 provisional because onset/impact may be shifted by one 30 Hz sample, ADL codes are placeholders,
-and the derived impact-plus-one-second fall tail is not used by the strict evaluation.
+and the activity end is derived as impact plus one second.
 
 The benchmark derives 2-second windows at a 0.5-second stride. A fall window is positive only if
-its final decision sample lies from onset through impact, inclusive. Post-impact decisions from
-windows that overlap the event are excluded. The resulting cache contains 53,260 retained
-windows, including 3,489 positive windows; 33 of 2,346 events have no valid positive decision
-window and count as misses in event-level sensitivity.
+its final decision sample lies within the fall activity segment, from onset through the
+impact-plus-one-second tail. A window that overlaps the segment but decides after its end is
+excluded. The resulting cache contains 53,365 retained windows: 8,027 positive and 45,338
+negative. It excludes 9,120 post-segment overlap windows; 4 of 2,346 events have no retained
+positive decision window and count as misses in event-level sensitivity.
+
+The exact distributed snapshot is declared in `data/snapshot_v1.json`. The machine-readable
+window, temporal-supervision, resampling, MIL, fold-evolution, and metric rules are declared in
+`configs/contracts/imu_benchmark_contract_v1.json`. Changing source bytes, logical HDF5 content,
+split files, or the contract intentionally creates a different derived-cache fingerprint.
 
 ## Validation and adding data
 
 After `git lfs pull`, run:
 
 ```bash
-imu-bench validate-data
+./benchmark validate-data
 git lfs fsck
 ```
 
@@ -108,3 +114,11 @@ Do not copy an arbitrary HDF5 file into these directories. A new distributed dat
 v3-compatible ingestion output, a dataset-namespaced participant mapping, an explicit training or
 external role, a split entry, an updated checksum manifest, and validator expectations. Changes
 to source content, splits, or temporal policy intentionally create a new derived-cache fingerprint.
+
+Before editing a split, use the read-only planner to retain current assignments and preview only
+new participants:
+
+```bash
+./benchmark plan-folds --collection training --format csv
+./benchmark plan-folds --collection external --format csv
+```

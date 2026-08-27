@@ -8,8 +8,8 @@ code are versioned together.
 The repository is a research benchmark, not an online fall-alert product. The five training
 datasets do not share reliable onset/impact intervals, so model fitting uses recording-level
 Multiple Instance Learning (MIL). A separate provisional KFall workflow evaluates the frozen
-models against onset/impact labels. It still does not estimate false alarms per hour or test an
-N-of-M alert policy.
+models against segment-based temporal labels. It reports false-positive decision windows per
+hour, but it does not yet merge windows into alert episodes or test an N-of-M alert policy.
 
 ## Reference environment
 
@@ -62,11 +62,12 @@ Run the three main commands from the repository root:
 - `reproduce` runs the fixed five-fold, 110-job conclusion recheck. `--resume` reuses compatible
   checkpoints after an interruption.
 
-On the reference RTX 4070 SUPER, the previous data snapshot required about three minutes to build
-the window cache, less than one minute for smoke, and about 70 minutes for the complete run.
-For the current corrected data, allow approximately 75–100 minutes after installation. A fresh
-Conda environment commonly adds another 20–60 minutes depending on network speed. At least
-25 GiB free space is required before a fresh toolchain installation.
+On the reference RTX 4070 SUPER, the current contract-v1 training cache required about 159 seconds
+to build and the KFall cache about 42 seconds. The earlier benchmark needed less than one minute
+for smoke and about 70 minutes for its complete run. Allow approximately 75–100 minutes for a
+fresh complete model run after installation; this remains an estimate until the contract-v1 full
+run is performed. A fresh Conda environment commonly adds another 20–60 minutes depending on
+network speed. At least 25 GiB free space is required before a fresh toolchain installation.
 
 The recheck intentionally uses the current corrected HDF5 files. It evaluates whether the model
 ranking and the universal-versus-dedicated conclusions remain supported; it does not promise
@@ -89,18 +90,22 @@ then performs frozen-weight inference on lower-back KFall recordings.
 - Universal and waist-only training are evaluated separately.
 - Each model uses four old-data participant folds for training and one for validation.
 - The full run contains 40 jobs: 2 suites × 4 models × 5 validation folds.
-- A 2-second window is positive only when its final, causal decision sample is between fall onset
-  and impact, inclusive. A window that reaches the fall but decides after impact is excluded.
-- One above-threshold positive window counts as an event detection. The 33 short fall events with
-  no valid decision window remain in the denominator and therefore count as misses.
+- A 2-second window is positive only when its final, causal decision sample lies in the
+  adapter-provided fall activity segment: onset through impact plus one second. A window that
+  overlaps the segment but decides after its end is excluded.
+- One above-threshold positive window counts as an event detection. The four fall events with no
+  retained positive decision window remain in the denominator and therefore count as misses.
 - Zero-shot recording metrics transfer the threshold selected on the old validation fold. The
   temporal comparison separately calibrates only the threshold with five participant-grouped
   KFall folds; KFall never updates model weights.
+- Temporal reporting includes event sensitivity, false-positive ADL recordings,
+  false-positive ADL decision windows per hour, and onset/impact-relative detection latency.
 
 The current KFall HDF5 is deliberately marked `provisional_kfall_adapter_v1`: onset/impact points
-may be shifted by one 30 Hz sample, the derived post-impact activity tail is ignored, and ADL task
-codes are placeholders. Results from this workflow are exploratory rather than formal project
-validation evidence.
+may be shifted by one 30 Hz sample and ADL task codes are placeholders. The activity segment's
+impact-plus-one-second tail is used for window supervision; onset and impact points remain
+available for localisation and latency only. Results from this workflow are exploratory rather
+than formal project validation evidence.
 
 ## Experiment contract
 
@@ -119,7 +124,13 @@ validation evidence.
 - Source provenance: each run records a Git commit or snapshot digest and dirty/unknown warnings.
   Warnings do not block exploratory or full runs, but they must be considered during review.
 - Data schema: HDF5 v3 (`3.0.0`); derived window caches are fingerprints of source HDF5 content,
-  split files, and the applicable temporal policy.
+  split files, the contract, the snapshot manifest, and the applicable temporal policy.
+
+The machine-readable protocol is frozen in
+[`configs/contracts/imu_benchmark_contract_v1.json`](configs/contracts/imu_benchmark_contract_v1.json).
+[`data/snapshot_v1.json`](data/snapshot_v1.json) records the exact six HDF5 files, split files,
+physical and logical hashes, counts, supervision types, and body locations. Experiment configs
+reference these files and cannot override contract-owned protocol fields.
 
 ## Advanced commands
 
@@ -130,12 +141,18 @@ reproduction path:
 ./benchmark validate-data
 ./benchmark prepare
 ./benchmark plan --profile reproduce
+./benchmark plan-folds --collection training --format csv
+./benchmark plan-folds --collection external --format csv
 ./benchmark run --profile smoke --models torch_cnn_lstm --suites fall_universal --folds 0
 ./benchmark report --profile reproduce
 ```
 
 `run` accepts comma-separated `--models`, `--suites`, and `--folds`. Such a run is a custom
 experiment and must not be described as the fixed 110-job reproduction.
+
+`plan-folds` is read-only. It preserves all existing participant assignments and prints a
+deterministic candidate assignment for any newly discovered participants. Review and version a
+new split file explicitly; the command never mutates the current split.
 
 ## Persistent work directory
 
