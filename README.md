@@ -61,11 +61,10 @@ The first smoke builds a unified derived cache. It reads every source HDF5 once 
 writes are flushed in batches of 16,384 windows. Later runs reuse the content-addressed cache and
 materialise each required input array once per invocation.
 
-For the retired snapshot v1 on the reference RTX 4070 SUPER machine, the fresh unified cache took
-97.2 seconds to build for 468,728 windows. The first seven-model smoke invocation, including that
-build, took 115.7 seconds; a fully resumed engine invocation took 2.34 seconds. These historical
-timings are engineering acceptance evidence, not model-quality evidence. Snapshot v2 changes the
-source data and deliberately receives a new cache fingerprint.
+For snapshot v2 on the reference RTX 4070 SUPER machine, the fresh unified cache took 126.6 seconds
+to build for 595,639 windows, and a fully resumed seven-model smoke invocation took 2.75 seconds.
+For comparison, the retired snapshot v1 cache contained 468,728 windows and took 97.2 seconds to
+build. These timings are engineering acceptance evidence, not model-quality evidence.
 
 ## Versioned experiments
 
@@ -100,12 +99,16 @@ KFall split, 50 maximum epochs, and patience 8. These pilots check full-scale ex
 checkpointing, performance, and numerical sanity. A single provisional fold is not formal
 model-validation evidence.
 
-For snapshot v1 on the reference machine with the unified cache already present, the first FP32 pilot invocation
-took 39.6 seconds and the BF16 pilot took 59.4 seconds. BF16 was not a general speed-up: compared
-with FP32, model fit was about 4% slower for 1D CNN, 50% faster for LSTM, and 8 times slower for
+The snapshot v2 FP32 pilot took 39.8 seconds. Six models reproduced the v1 test metrics exactly;
+cuML Logistic Regression changed Balanced Accuracy from 0.94523 to 0.94514 while converging at the
+same 263 iterations. The KFall raw windows and 158 features were byte-identical between caches, so
+this small change is recorded as GPU solver numerical variation rather than data drift.
+
+The retired snapshot v1 BF16 pilot took 59.4 seconds and was not a general speed-up: compared with
+FP32, model fit was about 4% slower for 1D CNN, 50% faster for LSTM, and 8 times slower for
 CNN-LSTM. Because early-stopping trajectories also differed, these are end-to-end engineering
-timings rather than fixed-epoch kernel benchmarks. FP32 therefore remains the default until a
-separate profiling task justifies a model-specific precision policy.
+timings rather than fixed-epoch kernel benchmarks. BF16 was not rerun for snapshot v2, and FP32
+remains the default until a separate profiling task justifies a model-specific precision policy.
 
 The configuration is split deliberately into three small layers:
 
