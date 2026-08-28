@@ -1,5 +1,7 @@
 # IMU Fall Benchmark
 
+[![CI](https://github.com/Kscii/imu-fall-benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/Kscii/imu-fall-benchmark/actions/workflows/ci.yml)
+
 This repository provides a six-axis IMU fall-detection benchmark for internal team use. It versions the training code, data contract, folds, experiment configurations, tests, and result formats. HDF5 datasets are not stored in Git; they are downloaded from the project's Google Cloud Storage (GCS) bucket.
 
 The current release covers one task only: training and evaluating causal sliding-window fall classifiers using temporal interval labels. Wear-location classification, recording-level MIL, Android alert policies, and automated deployment are outside the current scope.
@@ -26,9 +28,12 @@ sudo apt update
 sudo apt install --yes git curl ca-certificates tar
 ```
 
-Clone the repository into the WSL Linux filesystem, then run:
+Clone the public repository into the WSL Linux filesystem, then run:
 
 ```bash
+mkdir -p ~/projects
+cd ~/projects
+git clone https://github.com/Kscii/imu-fall-benchmark.git
 cd ~/projects/imu-fall-benchmark
 ./benchmark setup
 ./benchmark data pull
@@ -38,7 +43,7 @@ cd ~/projects/imu-fall-benchmark
 
 `setup` installs or reuses pinned Miniforge, Google Cloud CLI, and CUDA Python environments under `~/imu-fall-work`. It does not modify the system Python installation. A first installation normally takes 20–60 minutes and should have at least 25 GiB of free disk space.
 
-The first `data pull` asks the user to sign in to Google. It downloads only the immutable snapshot referenced by `current.json`, then checks each file's SHA-256, HDF5 v3.1 structure, logical fingerprint, and statistics. Git LFS is not required. Each WSL user signs in only once: the first command must be run directly in an interactive WSL terminal. Non-interactive SSH or Codex automation neither copies host credentials nor continues when authentication requires input. Later pulls can run automatically after sign-in.
+The first `data pull` asks the user to sign in to Google. It downloads only the immutable snapshot referenced by `current.json`, then checks each file's SHA-256, HDF5 v3.1 structure, logical fingerprint, and statistics. Git LFS is not required. Each WSL user signs in only once: the first command must be run directly in an interactive WSL terminal. If WSL cannot open a browser and reports a `gio` error, open the displayed URL in a Windows browser and complete the login there. Non-interactive SSH or Codex automation neither copies host credentials nor continues when authentication requires input. Later pulls can run automatically after sign-in.
 
 ## Routine commands
 
