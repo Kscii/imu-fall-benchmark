@@ -1,0 +1,15 @@
+{
+  "schema_version": "imu_benchmark_split_set_v1",
+  "splits": [
+    {
+      "path": "data/splits/participant_folds_v3.csv",
+      "version": "participant_5fold_v3",
+      "sha256": "422d97649700cc16b794bdae268ac306fe2567fcf7df935e49af1b4f2ab7b4e2"
+    },
+    {
+      "path": "data/splits/kfall_external_folds_v1.csv",
+      "version": "kfall_external_5fold_v1",
+      "sha256": "6ad9ac5cc9f839780eb4915089ecb2bf6b387e6cba9d21a303e58f427dcd38e5"
+    }
+  ]
+}

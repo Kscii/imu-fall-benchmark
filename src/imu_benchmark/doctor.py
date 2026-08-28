@@ -48,7 +48,7 @@ def run_doctor(*, random_seed: int, project_root: Path, work_root: Path) -> dict
     features = rng.normal(size=(64, 8)).astype(np.float32)
     labels = np.asarray([0, 1] * 32, dtype=np.int8)
     models: list[dict[str, Any]] = []
-    threshold_windows = rng.normal(size=(8, 60, 6)).astype(np.float32)
+    threshold_windows = rng.normal(size=(8, 50, 6)).astype(np.float32)
     threshold_scores = threshold_impact_scores(threshold_windows)
     models.append(
         {

@@ -13,8 +13,8 @@ from .specs import MODEL_SPECS
 def threshold_impact_scores(windows: np.ndarray) -> np.ndarray:
     """Return a unitless, interpretable impact score for each raw IMU window."""
     raw = np.asarray(windows, dtype=np.float32)
-    if raw.ndim != 3 or raw.shape[1:] != (60, 6):
-        raise ValueError(f"Expected (n, 60, 6) raw windows, got {raw.shape}")
+    if raw.ndim != 3 or raw.shape[1:] != (50, 6):
+        raise ValueError(f"Expected (n, 50, 6) raw windows, got {raw.shape}")
     params = MODEL_SPECS["threshold_impact"].fixed_params
     acceleration = np.linalg.norm(raw[:, :, :3], axis=2)
     angular_velocity = np.linalg.norm(raw[:, :, 3:], axis=2)

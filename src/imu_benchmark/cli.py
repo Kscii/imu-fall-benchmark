@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from .cloud_data import data_status, publish_base, pull_data
 from .configuration import load_experiment
 from .dataset import validate_data
 from .device import CudaUnavailable
@@ -19,11 +20,15 @@ from .runtime import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SMOKE_CONFIG = PROJECT_ROOT / "configs/experiments/kfall_smoke_v2.yaml"
+DEFAULT_SMOKE_CONFIG = PROJECT_ROOT / "configs/experiments/temporal_smoke_v1.yaml"
 
 
-def _config(path: Path) -> dict:
-    return load_experiment(PROJECT_ROOT, path.resolve())
+def _config(path: Path, paths: WorkPaths) -> dict:
+    return load_experiment(
+        PROJECT_ROOT,
+        path.resolve(),
+        snapshot_path=paths.data / "active.json",
+    )
 
 
 def _doctor_result(config: dict, paths: WorkPaths) -> dict:
@@ -37,8 +42,8 @@ def _doctor_result(config: dict, paths: WorkPaths) -> dict:
 
 
 def _execute(config_path: Path, *, resume: bool, paths: WorkPaths) -> dict:
-    config = _config(config_path)
-    validation = validate_data(PROJECT_ROOT)
+    config = _config(config_path, paths)
+    validation = validate_data(PROJECT_ROOT, snapshot_path=paths.data / "active.json")
     doctor = _doctor_result(config, paths)
     benchmark = run_experiment(
         project_root=PROJECT_ROOT,
@@ -58,9 +63,17 @@ def main() -> None:
         description="Run the WSL2/CUDA fall-detection benchmark from versioned YAML configs."
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    data = commands.add_parser("data", help="Pull or inspect immutable GCS datasets")
+    data_commands = data.add_subparsers(dest="data_command", required=True)
+    data_commands.add_parser("pull", help="Install current base and optional team snapshots")
+    data_commands.add_parser("status", help="Compare local active data with remote current")
+    publish = data_commands.add_parser(
+        "publish-base", help="Publish the reviewed public 25 Hz base snapshot"
+    )
+    publish.add_argument("--source-dir", type=Path, required=True)
     doctor = commands.add_parser("doctor", help="Verify WSL2, CUDA, and public model backends")
     doctor.add_argument("config", nargs="?", type=Path, default=DEFAULT_SMOKE_CONFIG)
-    commands.add_parser("validate-data", help="Verify LFS data, HDF5 v3, snapshot, and folds")
+    commands.add_parser("validate-data", help="Verify HDF5 v3.1 data, hashes, and folds")
     commands.add_parser("smoke", help="Run the default seven-model KFall FP32 smoke config")
     plan = commands.add_parser("plan", help="Resolve a YAML experiment without training")
     plan.add_argument("config", type=Path)
@@ -81,13 +94,22 @@ def main() -> None:
                 file=sys.stderr,
             )
         if args.command == "doctor":
-            result = _doctor_result(_config(args.config), paths)
+            result = _doctor_result(_config(args.config, paths), paths)
+        elif args.command == "data":
+            if args.data_command == "pull":
+                result = pull_data(PROJECT_ROOT, paths.data)
+            elif args.data_command == "status":
+                result = data_status(PROJECT_ROOT, paths.data)
+            elif args.data_command == "publish-base":
+                result = publish_base(PROJECT_ROOT, args.source_dir.resolve())
+            else:
+                raise AssertionError(f"Unhandled data command: {args.data_command}")
         elif args.command == "validate-data":
-            result = validate_data(PROJECT_ROOT)
+            result = validate_data(PROJECT_ROOT, snapshot_path=paths.data / "active.json")
         elif args.command == "smoke":
             result = _execute(DEFAULT_SMOKE_CONFIG, resume=True, paths=paths)
         elif args.command == "plan":
-            result = plan_experiment(_config(args.config))
+            result = plan_experiment(_config(args.config, paths))
         elif args.command == "run":
             result = _execute(args.config, resume=args.resume, paths=paths)
         elif args.command == "report":

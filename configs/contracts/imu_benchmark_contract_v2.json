@@ -1,25 +1,26 @@
 {
-  "contract_version": "imu_benchmark_contract_v1",
-  "data_schema_version": "3.0.0",
+  "contract_version": "imu_benchmark_contract_v2",
+  "data_schema_version": "3.1.0",
   "canonical_signal": {
-    "sampling_rate_hz": 30,
+    "sampling_rate_hz": 25,
     "channels": 6,
     "axis_frame": "sensor_local",
     "gravity": "retained"
   },
   "device_reference_resampling": {
     "nominal_source_rate_hz": 25,
-    "target_rate_hz": 30,
+    "target_rate_hz": 25,
     "method": "monotonic_timestamp_linear_interpolation",
     "extrapolation": "forbidden",
-    "ble_packet_timestamp_assignment": "out_of_scope"
+    "ble_packet_timestamp_assignment": "collector_contract"
   },
   "window": {
-    "schema_version": "causal_segment_2s_stride_0p5s_features_v2",
-    "external_schema_version": "causal_segment_2s_stride_0p5s_kfall_v2",
-    "feature_schema_version": "window_features_v1",
-    "samples": 60,
-    "stride_samples": 15,
+    "schema_version": "causal_decision_2s_stride_0p5s_v3",
+    "feature_schema_version": "window_features_v2_25hz",
+    "duration_seconds": 2.0,
+    "samples": 50,
+    "stride_seconds": 0.5,
+    "stride_grid": "nearest_half_up_absolute_time",
     "decision_sample": "last_sample"
   },
   "supervision": {
@@ -37,9 +38,9 @@
   "folds": {
     "count": 5,
     "seed": 3888,
-    "evolution": "preserve_existing_assign_new_deterministically",
-    "standard_protocol": "test_f_validation_next_train_remaining_three",
-    "external_protocol": "participant_grouped_four_calibration_one_test"
+    "base_policy": "participant_grouped_0_to_4",
+    "team_policy": "training_only_fold_minus_1",
+    "protocol": "test_f_validation_next_train_remaining_three_plus_team"
   },
   "metrics": {
     "recording_primary": "balanced_accuracy",
@@ -50,6 +51,6 @@
       "onset_latency_p95_s",
       "impact_offset_median_s"
     ],
-    "threshold_selection": "maximum_validation_balanced_accuracy"
+    "threshold_selection": "combined_validation_balanced_accuracy"
   }
 }

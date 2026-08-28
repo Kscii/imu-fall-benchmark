@@ -17,7 +17,7 @@ def linear_resample_to_grid(
     timestamps_s: np.ndarray,
     values: np.ndarray,
     *,
-    target_rate_hz: float = 30.0,
+    target_rate_hz: float = 25.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Interpolate six-axis values onto a regular grid without extrapolation."""
     timestamps = np.asarray(timestamps_s, dtype=np.float64)

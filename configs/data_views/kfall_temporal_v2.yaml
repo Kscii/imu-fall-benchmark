@@ -1,0 +1,9 @@
+schema_version: 2
+id: kfall_temporal_v2
+objective: temporal_supervised
+research_only: false
+supervision_kind: temporal
+dataset_filter:
+  - kfall
+include_training_only: false
+evaluation_policy: combined_cross_validation_with_dataset_subgroups

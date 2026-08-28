@@ -6,7 +6,10 @@ WORK_ROOT="${IMU_BENCH_WORK_ROOT:-${HOME}/imu-fall-work}"
 MINIFORGE_VERSION="26.3.2-2"
 MINIFORGE_SHA256="42260ffe3830fb953d5eee1bbb32229ff06aa7c3833c1ed7a9a0420a95685d94"
 MINIFORGE_URL="https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-${MINIFORGE_VERSION}-Linux-x86_64.sh"
-SETUP_SCHEMA="imu-benchmark-wsl-environment-v1"
+GCLOUD_VERSION="581.0.0"
+GCLOUD_SHA256="deffdbe82ca6e3d19ffb291d063a651488e04e1b33799b5a238e4b5c6784e3c6"
+GCLOUD_URL="https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-${GCLOUD_VERSION}-linux-x86_64.tar.gz"
+SETUP_SCHEMA="imu-benchmark-wsl-environment-v2"
 MIN_FREE_KIB=$((25 * 1024 * 1024))
 
 if [[ -d /usr/lib/wsl/lib ]]; then
@@ -17,17 +20,21 @@ usage() {
   cat <<'EOF'
 Usage: ./benchmark COMMAND [ARGS]
 
-Main commands:
-  setup                  Create or reuse the WSL CUDA environment
-  doctor                 Verify WSL2, CUDA, paths, and GPU model backends
-  test                   Run Ruff and pytest in the project environment
-  validate-data          Validate Git LFS data, HDF5 schemas, and folds
-  smoke                  Run the default seven-model KFall smoke experiment
-  plan CONFIG.yaml       Resolve an experiment without training
-  run CONFIG.yaml        Run a versioned experiment
-  report RUN_ID          Regenerate a report from completed checkpoints
+First use:
+  ./benchmark setup       Install or reuse the pinned WSL2/CUDA environment
+  ./benchmark data pull   Download and verify the current immutable datasets
+  ./benchmark doctor      Verify WSL2, CUDA, data, and all model backends
+  ./benchmark smoke       Run the capped seven-model temporal smoke test
 
-All commands use the same versioned YAML configuration interface.
+Other commands:
+  data status             Compare local data with remote current pointers
+  data publish-base --source-dir PATH
+                          Publish the reviewed public 25 Hz base snapshot
+  test                    Run Ruff and pytest in the project environment
+  validate-data           Validate active HDF5 v3.1 data and participant folds
+  plan CONFIG.yaml        Resolve an experiment without training
+  run CONFIG.yaml         Run a versioned experiment
+  report RUN_ID           Regenerate a report from completed checkpoints
 EOF
 }
 
@@ -70,6 +77,10 @@ project_miniforge() {
   printf '%s/toolchains/miniforge-%s/bin/conda\n' "${WORK_ROOT}" "${MINIFORGE_VERSION}"
 }
 
+project_gcloud() {
+  printf '%s/toolchains/google-cloud-sdk-%s/bin/gcloud\n' "${WORK_ROOT}" "${GCLOUD_VERSION}"
+}
+
 find_conda() {
   if [[ -n "${IMU_BENCH_CONDA_EXE:-}" ]]; then
     printf '%s\n' "${IMU_BENCH_CONDA_EXE}"
@@ -80,20 +91,36 @@ find_conda() {
   fi
 }
 
+find_gcloud() {
+  if [[ -n "${IMU_BENCH_GCLOUD_EXE:-}" ]]; then
+    printf '%s\n' "${IMU_BENCH_GCLOUD_EXE}"
+  elif command -v gcloud >/dev/null 2>&1; then
+    command -v gcloud
+  else
+    project_gcloud
+  fi
+}
+
 environment_path() {
   printf '%s/envs/%s\n' "${WORK_ROOT}" "$(dependency_digest)"
+}
+
+require_download_tools() {
+  command -v curl >/dev/null || {
+    echo "ERROR: curl is required. Install: sudo apt install --yes curl ca-certificates" >&2
+    exit 1
+  }
+  command -v tar >/dev/null || {
+    echo "ERROR: tar is required. Install: sudo apt install --yes tar" >&2
+    exit 1
+  }
 }
 
 install_miniforge() {
   local destination installer temporary
   destination="${WORK_ROOT}/toolchains/miniforge-${MINIFORGE_VERSION}"
-  if [[ -x "${destination}/bin/conda" ]]; then
-    return
-  fi
-  command -v curl >/dev/null || {
-    echo "ERROR: curl is required. Install it with: sudo apt install --yes curl ca-certificates" >&2
-    exit 1
-  }
+  [[ -x "${destination}/bin/conda" ]] && return
+  require_download_tools
   temporary="$(mktemp -d)"
   installer="${temporary}/Miniforge3.sh"
   trap 'rm -rf -- "${temporary}"' RETURN
@@ -105,21 +132,21 @@ install_miniforge() {
   rm -rf -- "${temporary}"
 }
 
-check_distribution_data() {
-  if git -C "${REPO_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    if ! command -v git-lfs >/dev/null; then
-      cat >&2 <<'EOF'
-ERROR: Git LFS is required for a cloned repository. Run:
-  sudo apt update
-  sudo apt install --yes git-lfs
-Then rerun ./benchmark setup.
-EOF
-      exit 1
-    fi
-    git -C "${REPO_ROOT}" lfs install --local
-    git -C "${REPO_ROOT}" lfs pull
-    git -C "${REPO_ROOT}" lfs fsck
-  fi
+install_gcloud() {
+  local destination archive temporary
+  destination="${WORK_ROOT}/toolchains/google-cloud-sdk-${GCLOUD_VERSION}"
+  [[ -x "${destination}/bin/gcloud" ]] && return
+  require_download_tools
+  temporary="$(mktemp -d)"
+  archive="${temporary}/gcloud.tar.gz"
+  trap 'rm -rf -- "${temporary}"' RETURN
+  curl --fail --location --retry 3 --output "${archive}" "${GCLOUD_URL}"
+  printf '%s  %s\n' "${GCLOUD_SHA256}" "${archive}" | sha256sum --check --status
+  tar -xzf "${archive}" -C "${temporary}"
+  mkdir -p -- "$(dirname -- "${destination}")"
+  mv -- "${temporary}/google-cloud-sdk" "${destination}"
+  trap - RETURN
+  rm -rf -- "${temporary}"
 }
 
 setup_environment() {
@@ -127,7 +154,7 @@ setup_environment() {
   require_wsl2
   require_absolute_work_root
   command -v git >/dev/null || {
-    echo "ERROR: git is required. Install it with: sudo apt install --yes git" >&2
+    echo "ERROR: git is required. Install: sudo apt install --yes git" >&2
     exit 1
   }
   command -v sha256sum >/dev/null || {
@@ -138,8 +165,8 @@ setup_environment() {
     echo "ERROR: nvidia-smi is unavailable inside WSL2." >&2
     exit 1
   fi
-  check_distribution_data
-  mkdir -p -- "${WORK_ROOT}/envs" "${WORK_ROOT}/cache" "${WORK_ROOT}/runs"
+  mkdir -p -- "${WORK_ROOT}/envs" "${WORK_ROOT}/data" "${WORK_ROOT}/cache" \
+    "${WORK_ROOT}/runs" "${WORK_ROOT}/toolchains"
   conda_exe="$(find_conda)"
   if [[ ! -x "${conda_exe}" ]]; then
     free_kib="$(df -Pk "${HOME}" | awk 'NR == 2 {print $4}')"
@@ -150,6 +177,7 @@ setup_environment() {
     install_miniforge
     conda_exe="$(project_miniforge)"
   fi
+  install_gcloud
   env_path="$(environment_path)"
   marker="${env_path}/.imu-benchmark-complete"
   if [[ ! -f "${marker}" ]]; then
@@ -162,22 +190,26 @@ setup_environment() {
       python -m pip install --requirement "${REPO_ROOT}/requirements-torch-cu129.txt"
     printf '%s\n' "$(dependency_digest)" >"${marker}"
   fi
-  PYTHONPATH="${REPO_ROOT}/src" "${conda_exe}" run --no-capture-output \
-    --prefix "${env_path}" python -m imu_benchmark.cli validate-data
-  printf 'Environment ready: %s\nWork root: %s\n' "${env_path}" "${WORK_ROOT}"
+  printf 'Environment ready: %s\nWork root: %s\nNext: ./benchmark data pull\n' \
+    "${env_path}" "${WORK_ROOT}"
 }
 
 run_in_environment() {
-  local conda_exe env_path
+  local conda_exe env_path gcloud_exe
   require_absolute_work_root
   conda_exe="$(find_conda)"
   env_path="$(environment_path)"
+  gcloud_exe="$(find_gcloud)"
   if [[ ! -x "${conda_exe}" || ! -f "${env_path}/.imu-benchmark-complete" ]]; then
     echo "ERROR: the project environment is missing; run ./benchmark setup in WSL2." >&2
     exit 1
   fi
-  PYTHONPATH="${REPO_ROOT}/src" "${conda_exe}" run --no-capture-output \
-    --prefix "${env_path}" "$@"
+  if [[ ! -x "${gcloud_exe}" ]]; then
+    echo "ERROR: gcloud is missing; rerun ./benchmark setup in WSL2." >&2
+    exit 1
+  fi
+  PATH="$(dirname -- "${gcloud_exe}"):${PATH}" PYTHONPATH="${REPO_ROOT}/src" \
+    "${conda_exe}" run --no-capture-output --prefix "${env_path}" "$@"
 }
 
 command="${1:-}"
@@ -204,10 +236,7 @@ case "${command}" in
     run_in_environment pytest -q "${REPO_ROOT}/tests"
     ;;
   *)
-    if is_wsl2; then
-      run_in_environment python -m imu_benchmark.cli "$@"
-    else
-      PYTHONPATH="${REPO_ROOT}/src" "${PYTHON:-python3}" -m imu_benchmark.cli "$@"
-    fi
+    require_wsl2
+    run_in_environment python -m imu_benchmark.cli "$@"
     ;;
 esac

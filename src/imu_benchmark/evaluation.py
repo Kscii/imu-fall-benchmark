@@ -8,16 +8,15 @@ def false_positive_windows_per_hour(
     scores: np.ndarray,
     *,
     threshold: float,
-    stride_samples: int,
-    sampling_rate_hz: float,
+    stride_seconds: float,
 ) -> tuple[int, float, float]:
     values = np.asarray(scores, dtype=np.float64)
     if values.ndim != 1 or not np.isfinite(values).all():
         raise ValueError("Window scores must be a finite one-dimensional array")
-    if stride_samples <= 0 or sampling_rate_hz <= 0:
-        raise ValueError("Stride and sampling rate must be positive")
+    if stride_seconds <= 0:
+        raise ValueError("Stride duration must be positive")
     false_positives = int(np.count_nonzero(values >= threshold))
-    negative_hours = len(values) * stride_samples / sampling_rate_hz / 3600.0
+    negative_hours = len(values) * stride_seconds / 3600.0
     rate = false_positives / negative_hours if negative_hours else 0.0
     return false_positives, negative_hours, rate
 

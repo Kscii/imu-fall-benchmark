@@ -11,20 +11,9 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from .contract import DEFAULT_CONTRACT_PATH, DEFAULT_SNAPSHOT_PATH, load_contract_snapshot
+from .contract import DEFAULT_CONTRACT_PATH, default_active_snapshot_path, load_contract_snapshot
 
-TRAINING_DATASET_IDS = (
-    "cgu_bes",
-    "ipqm_fall",
-    "sfu_ipml",
-    "sisfall",
-    "uci_455",
-    "umafall",
-    "univrfall",
-    "upfall",
-)
-EXTERNAL_DATASET_IDS = ("kfall",)
-EXPECTED_SCHEMA_VERSION = "3.0.0"
+EXPECTED_SCHEMA_VERSION = "3.1.0"
 FEATURE_COLUMNS = (
     "acceleration_x_mps2",
     "acceleration_y_mps2",
@@ -64,11 +53,11 @@ class FallEvent:
 
     @property
     def onset_time_s(self) -> float:
-        return self.onset_sample / 30.0
+        return self.onset_sample / 25.0
 
     @property
     def impact_time_s(self) -> float:
-        return self.impact_sample / 30.0
+        return self.impact_sample / 25.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,7 +117,7 @@ def _data_files(data_root: Path, expected_ids: Collection[str]) -> tuple[Path, .
         with path.open("rb") as source:
             prefix = source.read(40)
         if prefix.startswith(b"version https://git-lfs.github.com/spec"):
-            raise ValueError(f"{path} is a Git LFS pointer; run git lfs pull")
+            raise ValueError(f"{path} is not an HDF5 file (a Git LFS pointer was found)")
     return files
 
 
@@ -220,8 +209,11 @@ def _check_file(path: Path) -> dict[str, object]:
         ):
             if _text(handle.attrs.get(name, "")) != expected:
                 raise ValueError(f"{path.name}: invalid {name}")
-        if float(handle.attrs.get("sampling_rate_hz", 0.0)) != 30.0:
-            raise ValueError(f"{path.name}: expected 30 Hz data")
+        if float(handle.attrs.get("sampling_rate_hz", 0.0)) != 25.0:
+            raise ValueError(f"{path.name}: expected 25 Hz data")
+        evaluation_role = _text(handle.attrs.get("evaluation_role", ""))
+        if evaluation_role not in {"cross_validation", "training_only"}:
+            raise ValueError(f"{path.name}: invalid evaluation_role")
         if tuple(json.loads(_text(handle.attrs.get("feature_columns", "[]")))) != FEATURE_COLUMNS:
             raise ValueError(f"{path.name}: unexpected feature columns")
 
@@ -310,6 +302,7 @@ def _check_file(path: Path) -> dict[str, object]:
             "body_locations": dict(Counter(_text(x) for x in sequence_rows["body_location"])),
             "fall_sequences": int(np.count_nonzero(sequence_rows["is_fall"])),
             "logical_content_sha256": logical_hash,
+            "evaluation_role": evaluation_role,
         }
 
 
@@ -321,67 +314,31 @@ def validate_hdf5_file(path: Path) -> dict[str, object]:
     return {**result, "participants": len(participants)}
 
 
-def _snapshot_files(snapshot: dict[str, object]) -> dict[str, tuple[str, int | None]]:
-    expected: dict[str, tuple[str, int | None]] = {}
-    collections = snapshot["collections"]
-    if not isinstance(collections, dict):
-        raise ValueError("Invalid snapshot collections")
-    for collection in collections.values():
-        if not isinstance(collection, dict):
-            raise ValueError("Invalid snapshot collection")
-        split = collection["split"]
-        if not isinstance(split, dict):
-            raise ValueError("Invalid snapshot split")
-        expected[str(split["path"])] = (str(split["sha256"]), None)
-        datasets = collection["datasets"]
-        if not isinstance(datasets, list):
-            raise ValueError("Invalid snapshot datasets")
-        for item in datasets:
-            if not isinstance(item, dict):
-                raise ValueError("Invalid snapshot dataset")
-            expected[str(item["path"])] = (str(item["sha256"]), int(item["size_bytes"]))
-    return expected
-
-
-def _check_checksums(project_root: Path, snapshot: dict[str, object]) -> None:
-    manifest = project_root / "data/checksums.sha256"
-    if not manifest.is_file():
-        raise ValueError(f"Missing checksum manifest: {manifest}")
-    expected: dict[str, str] = {}
-    for line in manifest.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        digest, relative = line.split(maxsplit=1)
-        expected[relative.strip()] = digest
-    snapshot_files = _snapshot_files(snapshot)
-    if set(expected) != set(snapshot_files):
-        raise ValueError("Checksum manifest does not exactly cover the distributed data")
-    for relative, (snapshot_digest, expected_size) in sorted(snapshot_files.items()):
-        digest = expected[relative]
-        if digest != snapshot_digest:
-            raise ValueError(f"Checksum manifest disagrees with snapshot: {relative}")
-        path = project_root / relative
-        if not path.is_file() or _sha256(path) != digest:
-            raise ValueError(f"Checksum mismatch: {relative}")
-        if expected_size is not None and path.stat().st_size != expected_size:
-            raise ValueError(f"File size mismatch: {relative}")
-
-
-def _check_split(
-    split_path: Path,
+def _check_splits(
+    project_root: Path,
+    manifests: object,
     participants: set[tuple[str, str]],
-    *,
-    split_version: str,
 ) -> dict[str, object]:
+    if not isinstance(manifests, list) or not manifests:
+        raise ValueError("Base data requires participant split manifests")
     assignments: dict[tuple[str, str], int] = {}
-    with split_path.open(encoding="utf-8-sig", newline="") as source:
-        for row in csv.DictReader(source):
-            if row["split_version"] != split_version:
-                raise ValueError(f"Unexpected split version: {row['split_version']}")
-            key = (row["dataset_id"], row["participant_id"])
-            if key in assignments:
-                raise ValueError(f"Duplicate split assignment: {key}")
-            assignments[key] = int(row["fold_id"])
+    versions: list[str] = []
+    for manifest in manifests:
+        if not isinstance(manifest, dict):
+            raise ValueError("Invalid participant split manifest")
+        split_path = project_root / str(manifest["path"])
+        if not split_path.is_file() or _sha256(split_path) != manifest["sha256"]:
+            raise ValueError(f"Participant split checksum mismatch: {split_path}")
+        version = str(manifest["version"])
+        versions.append(version)
+        with split_path.open(encoding="utf-8-sig", newline="") as source:
+            for row in csv.DictReader(source):
+                if row["split_version"] != version:
+                    raise ValueError(f"Unexpected split version: {row['split_version']}")
+                key = (row["dataset_id"], row["participant_id"])
+                if key in assignments:
+                    raise ValueError(f"Duplicate split assignment: {key}")
+                assignments[key] = int(row["fold_id"])
     if set(assignments) != participants:
         missing = sorted(participants - set(assignments))
         extra = sorted(set(assignments) - participants)
@@ -389,7 +346,7 @@ def _check_split(
     if set(assignments.values()) != set(range(5)):
         raise ValueError("Participant folds must cover 0..4")
     return {
-        "version": split_version,
+        "versions": versions,
         "participants": len(assignments),
         "fold_counts": {
             str(fold): sum(value == fold for value in assignments.values()) for fold in range(5)
@@ -398,17 +355,18 @@ def _check_split(
 
 
 def _validate_collection(
-    project_root: Path, collection: dict[str, object], expected_ids: Collection[str]
+    active_root: Path,
+    collection: dict[str, object],
+    expected_role: str,
 ) -> tuple[dict[str, int], set[tuple[str, str]], list[dict[str, object]]]:
-    data_root = project_root / str(collection["data_path"])
+    data_root = active_root / str(collection["data_path"])
     entries = collection["datasets"]
     if not isinstance(entries, list):
         raise ValueError("Invalid snapshot dataset entries")
     entry_by_id = {
         str(item["dataset_id"]): item for item in entries if isinstance(item, dict)
     }
-    if set(entry_by_id) != set(expected_ids):
-        raise ValueError("Snapshot dataset membership does not match the collection")
+    expected_ids = tuple(entry_by_id)
     totals = {"sequences": 0, "rows": 0, "annotations": 0, "events": 0, "segments": 0}
     participants: set[tuple[str, str]] = set()
     datasets: list[dict[str, object]] = []
@@ -416,27 +374,32 @@ def _validate_collection(
         result = _check_file(path)
         dataset_id = str(result["dataset_id"])
         entry = entry_by_id[dataset_id]
-        expected_path = (project_root / str(entry["path"])).resolve()
+        expected_path = (data_root / str(entry["path"])).resolve()
         if path.resolve() != expected_path:
             raise ValueError(f"Snapshot path mismatch for {dataset_id}")
+        if path.stat().st_size != int(entry["size_bytes"]):
+            raise ValueError(f"Snapshot size mismatch for {dataset_id}")
+        if _sha256(path) != str(entry["sha256"]):
+            raise ValueError(f"Snapshot SHA-256 mismatch for {dataset_id}")
         dataset_participants = result.pop("participants")
         if not isinstance(dataset_participants, set):
             raise ValueError(f"Invalid participant summary for {dataset_id}")
-        if len(dataset_participants) != int(entry["participants"]):
+        if "participants" in entry and len(dataset_participants) != int(entry["participants"]):
             raise ValueError(f"Participant count mismatch for {dataset_id}")
         for field in (
             "sequences",
             "rows",
             "annotations",
-            "events",
-            "segments",
-            "fall_sequences",
             "logical_content_sha256",
-            "supervision",
-            "body_locations",
+            "evaluation_role",
         ):
             if result[field] != entry[field]:
                 raise ValueError(f"Snapshot {field} mismatch for {dataset_id}")
+        for field in ("events", "segments", "fall_sequences", "supervision", "body_locations"):
+            if field in entry and result[field] != entry[field]:
+                raise ValueError(f"Snapshot {field} mismatch for {dataset_id}")
+        if result["evaluation_role"] != expected_role:
+            raise ValueError(f"Unexpected evaluation role for {dataset_id}")
         participants.update((dataset_id, value) for value in dataset_participants)
         for name in totals:
             totals[name] += int(result[name])
@@ -448,49 +411,45 @@ def validate_data(
     project_root: Path,
     *,
     contract_path: Path = DEFAULT_CONTRACT_PATH,
-    snapshot_path: Path = DEFAULT_SNAPSHOT_PATH,
+    snapshot_path: Path | None = None,
 ) -> dict[str, object]:
+    active_path = default_active_snapshot_path() if snapshot_path is None else snapshot_path
     contract, snapshot, contract_sha256, snapshot_sha256 = load_contract_snapshot(
-        project_root, contract_path=contract_path, snapshot_path=snapshot_path
+        project_root, contract_path=contract_path, snapshot_path=active_path
     )
-    _check_checksums(project_root, snapshot)
     collections = snapshot["collections"]
     if not isinstance(collections, dict):
         raise ValueError("Invalid snapshot collections")
-    training_collection = collections["training"]
-    external_collection = collections["external"]
-    if not isinstance(training_collection, dict) or not isinstance(external_collection, dict):
-        raise ValueError("Invalid snapshot collection shape")
-    training_ids = tuple(str(item["dataset_id"]) for item in training_collection["datasets"])
-    training_totals, training_participants, training_datasets = _validate_collection(
-        project_root, training_collection, training_ids
+    base_collection = collections["base"]
+    if not isinstance(base_collection, dict):
+        raise ValueError("Invalid base collection")
+    base_totals, base_participants, base_datasets = _validate_collection(
+        active_path.parent,
+        base_collection,
+        "cross_validation",
     )
-    training_split = training_collection["split"]
-    if not isinstance(training_split, dict):
-        raise ValueError("Invalid training split manifest")
-    training_split = _check_split(
-        project_root / str(training_split["path"]),
-        training_participants,
-        split_version=str(training_split["version"]),
+    base_split = _check_splits(
+        project_root,
+        base_collection["splits"],
+        base_participants,
     )
-    external_ids = tuple(str(item["dataset_id"]) for item in external_collection["datasets"])
-    external_totals, external_participants, external_datasets = _validate_collection(
-        project_root, external_collection, external_ids
-    )
-    kfall = next((item for item in external_datasets if item["dataset_id"] == "kfall"), None)
-    if kfall is not None:
-        if kfall["supervision"] != {"temporal": 5075}:
-            raise ValueError("KFall must contain 5,075 temporal sequences")
-        if kfall["body_locations"] != {"lower_back": 5075}:
-            raise ValueError("KFall must contain lower_back sequences only")
-    external_split_manifest = external_collection["split"]
-    if not isinstance(external_split_manifest, dict):
-        raise ValueError("Invalid external split manifest")
-    external_split = _check_split(
-        project_root / str(external_split_manifest["path"]),
-        external_participants,
-        split_version=str(external_split_manifest["version"]),
-    )
+    team_summary = None
+    if "team" in collections:
+        team_collection = collections["team"]
+        if not isinstance(team_collection, dict):
+            raise ValueError("Invalid team collection")
+        team_totals, team_participants, team_datasets = _validate_collection(
+            active_path.parent,
+            team_collection,
+            "training_only",
+        )
+        team_summary = {
+            "files": len(team_datasets),
+            **team_totals,
+            "participants": len(team_participants),
+            "fold_id": -1,
+            "datasets": team_datasets,
+        }
     return {
         "status": "PASS",
         "schema_version": contract["data_schema_version"],
@@ -498,25 +457,22 @@ def validate_data(
         "contract_sha256": contract_sha256,
         "snapshot_version": snapshot["snapshot_version"],
         "snapshot_sha256": snapshot_sha256,
-        "training": {
-            "files": len(training_datasets),
-            **training_totals,
-            "split": training_split,
-            "datasets": training_datasets,
+        "base_snapshot_id": snapshot["base_snapshot_id"],
+        "team_snapshot_id": snapshot.get("team_snapshot_id"),
+        "base": {
+            "files": len(base_datasets),
+            **base_totals,
+            "split": base_split,
+            "datasets": base_datasets,
         },
-        "external": {
-            "files": len(external_datasets),
-            **external_totals,
-            "split": external_split,
-            "datasets": external_datasets,
-        },
+        "team": team_summary,
     }
 
 
 def iter_recordings(
     data_root: Path,
     *,
-    expected_dataset_ids: Collection[str] = TRAINING_DATASET_IDS,
+    expected_dataset_ids: Collection[str],
 ) -> Iterator[IMURecording]:
     seen: set[tuple[str, str]] = set()
     for path in _data_files(data_root, expected_dataset_ids):

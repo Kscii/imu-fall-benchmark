@@ -1,0 +1,28 @@
+schema_version: 2
+id: kfall_fold0_regression_v1
+contract_path: configs/contracts/imu_benchmark_contract_v2.json
+snapshot_path: active.json
+data_view_path: configs/data_views/kfall_temporal_v2.yaml
+model_catalog_path: configs/models/fall_models_v1.yaml
+models:
+  - threshold_impact
+  - cuml_logistic_regression
+  - cuml_random_forest
+  - xgboost_cuda
+  - torch_1d_cnn
+  - torch_lstm
+  - torch_cnn_lstm
+folds: [0]
+seeds: [3888]
+precision: fp32
+gpu_mode: auto
+max_epochs: 50
+patience: 8
+max_sequences_per_split: null
+max_windows_per_sequence: null
+cache_flush_windows: 16384
+data_quality_status: regression_reference
+known_limitations:
+  - This single-fold KFall run is a regression reference, not formal multi-fold evidence.
+  - KFall uses adapter-provided fall-activity segments for decision-time labels.
+  - Window false positives per hour are not product alarm episodes per hour.

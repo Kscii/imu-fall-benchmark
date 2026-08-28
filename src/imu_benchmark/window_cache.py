@@ -18,7 +18,7 @@ from .dataset import IMURecording, iter_recordings
 from .performance import PhaseTimer
 from .protocol import segment_decision_time_labels
 
-WINDOW_CACHE_SCHEMA = "unified_fall_windows_v3"
+WINDOW_CACHE_SCHEMA = "unified_fall_windows_v4_25hz"
 
 
 def _text_array(dataset: h5py.Dataset) -> np.ndarray:
@@ -29,8 +29,7 @@ def _text_array(dataset: h5py.Dataset) -> np.ndarray:
 
 def _split_assignments(project_root: Path, snapshot: dict[str, Any]) -> dict[tuple[str, str], int]:
     result: dict[tuple[str, str], int] = {}
-    for collection in snapshot["collections"].values():
-        split = collection["split"]
+    for split in snapshot["collections"]["base"]["splits"]:
         path = project_root / split["path"]
         with path.open(encoding="utf-8-sig", newline="") as source:
             for row in csv.DictReader(source):
@@ -44,22 +43,51 @@ def _split_assignments(project_root: Path, snapshot: dict[str, Any]) -> dict[tup
 
 
 def _recording_collections(
-    project_root: Path, snapshot: dict[str, Any]
+    project_root: Path,
+    active_root: Path,
+    snapshot: dict[str, Any],
 ) -> Iterator[tuple[IMURecording, int]]:
     assignments = _split_assignments(project_root, snapshot)
-    for collection in snapshot["collections"].values():
+    for collection_name, collection in snapshot["collections"].items():
         dataset_ids = tuple(item["dataset_id"] for item in collection["datasets"])
         for recording in iter_recordings(
-            project_root / collection["data_path"], expected_dataset_ids=dataset_ids
+            active_root / collection["data_path"], expected_dataset_ids=dataset_ids
         ):
-            key = (recording.dataset_id, recording.participant_id)
-            if key not in assignments:
-                raise ValueError(f"Missing participant fold for {key}")
-            yield recording, assignments[key]
+            if collection_name == "team":
+                yield recording, -1
+            else:
+                key = (recording.dataset_id, recording.participant_id)
+                if key not in assignments:
+                    raise ValueError(f"Missing participant fold for {key}")
+                yield recording, assignments[key]
 
 
-def _windows(values: np.ndarray, length: int, stride: int) -> tuple[np.ndarray, np.ndarray]:
-    starts = np.arange(0, len(values) - length + 1, stride, dtype=np.int32)
+def _window_starts(
+    sample_count: int,
+    length: int,
+    sampling_rate_hz: float,
+    stride_seconds: float,
+) -> np.ndarray:
+    last_start = sample_count - length
+    if last_start < 0:
+        return np.empty(0, dtype=np.int32)
+    count = int(np.floor((last_start / sampling_rate_hz) / stride_seconds + 1e-12)) + 1
+    starts = np.floor(
+        np.arange(count, dtype=np.float64) * stride_seconds * sampling_rate_hz + 0.5
+    ).astype(np.int32)
+    starts = starts[starts <= last_start]
+    if len(starts) and (starts[0] != 0 or np.any(np.diff(starts) <= 0)):
+        raise ValueError("Window start grid is not strictly increasing from zero")
+    return starts
+
+
+def _windows(
+    values: np.ndarray,
+    length: int,
+    sampling_rate_hz: float,
+    stride_seconds: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    starts = _window_starts(len(values), length, sampling_rate_hz, stride_seconds)
     if not len(starts):
         return np.empty((0, length, 6), dtype=np.float32), starts
     windows = np.stack([values[start : start + length] for start in starts])
@@ -107,7 +135,7 @@ def _cache_fingerprint(config: dict[str, Any]) -> str:
         "contract_sha256": config["contract_sha256"],
         "snapshot_sha256": config["snapshot_sha256"],
         "window_samples": config["contract"]["window"]["samples"],
-        "stride_samples": config["contract"]["window"]["stride_samples"],
+        "stride_seconds": config["contract"]["window"]["stride_seconds"],
         "feature_names": FEATURE_NAMES,
         "flush_windows": config["cache_flush_windows"],
     }
@@ -127,7 +155,7 @@ def prepare_unified_window_store(
         return destination, {**manifest, "cache_reused_this_invocation": True}
 
     window_samples = int(config["contract"]["window"]["samples"])
-    stride_samples = int(config["contract"]["window"]["stride_samples"])
+    stride_seconds = float(config["contract"]["window"]["stride_seconds"])
     sampling_rate_hz = float(config["contract"]["canonical_signal"]["sampling_rate_hz"])
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(f".h5.tmp-{os.getpid()}")
@@ -163,7 +191,7 @@ def prepare_unified_window_store(
                     "snapshot_sha256": config["snapshot_sha256"],
                     "sampling_rate_hz": sampling_rate_hz,
                     "window_samples": window_samples,
-                    "stride_samples": stride_samples,
+                    "stride_seconds": stride_seconds,
                     "feature_names": json.dumps(FEATURE_NAMES),
                     "hdf5_compatibility": "1.14",
                 }
@@ -228,11 +256,20 @@ def prepare_unified_window_store(
 
             recordings = phases.iterate(
                 "source_hdf5_read_seconds",
-                _recording_collections(project_root, config["snapshot"]),
+                _recording_collections(
+                    project_root,
+                    Path(config["active_data_root"]),
+                    config["snapshot"],
+                ),
             )
             for recording, fold in recordings:
                 with phases.track("window_generation_seconds"):
-                    raw, starts = _windows(recording.values, window_samples, stride_samples)
+                    raw, starts = _windows(
+                        recording.values,
+                        window_samples,
+                        sampling_rate_hz,
+                        stride_seconds,
+                    )
                 if not len(raw):
                     skipped_short += 1
                     continue
@@ -352,7 +389,7 @@ def prepare_unified_window_store(
                 "snapshot_sha256": config["snapshot_sha256"],
                 "sampling_rate_hz": sampling_rate_hz,
                 "window_samples": window_samples,
-                "stride_samples": stride_samples,
+                "stride_seconds": stride_seconds,
                 "cache_flush_windows": int(config["cache_flush_windows"]),
                 "sequences": sequence_count,
                 "windows": window_count,
@@ -381,7 +418,7 @@ def prepare_unified_window_store(
             }
             handle.attrs["manifest_json"] = json.dumps(manifest, sort_keys=True)
             if "kfall" in dataset_windows:
-                regression = {
+                manifest["kfall_regression_candidate"] = {
                     "windows": dataset_windows["kfall"],
                     "positive": dataset_positive_temporal["kfall"],
                     "negative": dataset_negative_temporal["kfall"],
@@ -393,19 +430,6 @@ def prepare_unified_window_store(
                         "kfall", 0
                     ),
                 }
-                expected = {
-                    "windows": 53_365,
-                    "positive": 8_027,
-                    "negative": 45_338,
-                    "events": 2_346,
-                    "events_without_positive_window": 4,
-                    "skipped_post_segment_overlap_windows": 9_120,
-                }
-                if regression != expected:
-                    raise ValueError(
-                        "KFall window regression mismatch: "
-                        f"expected={expected}, actual={regression}"
-                    )
             handle.flush()
         os.replace(temporary, destination)
     except BaseException:

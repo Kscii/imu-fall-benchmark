@@ -28,7 +28,7 @@ from .performance import (
     process_delta,
     process_snapshot,
 )
-from .sequence_models import aggregate_bag_scores, threshold_impact_scores
+from .sequence_models import threshold_impact_scores
 from .unified_models import (
     CudaSequenceTrainer,
     feature_normalization,
@@ -278,25 +278,21 @@ def split_indices(
     view = config["data_view"]
     validation_fold = (fold + 1) % 5
     datasets = store.window_datasets()
-    primary = np.isin(datasets, view["training_datasets"])
-    if view["objective"] == "temporal_supervised":
-        primary &= store.temporal_label >= 0
-    train_mask = primary & (store.fold_id != fold) & (store.fold_id != validation_fold)
+    primary = store.temporal_label >= 0
+    dataset_filter = view["dataset_filter"]
+    if dataset_filter is not None:
+        primary &= np.isin(datasets, dataset_filter)
+    training_only = store.fold_id == -1
+    train_mask = primary & (
+        ((store.fold_id != fold) & (store.fold_id != validation_fold) & ~training_only)
+        | (training_only & bool(view["include_training_only"]))
+    )
     validation_mask = primary & (store.fold_id == validation_fold)
     test_mask = primary & (store.fold_id == fold)
     train = _apply_limits(store, np.flatnonzero(train_mask), config, seed + 11)
     validation = _apply_limits(store, np.flatnonzero(validation_mask), config, seed + 13)
     test = _apply_limits(store, np.flatnonzero(test_mask), config, seed + 17)
-    supplements = view["negative_supplement_datasets"]
-    if supplements:
-        supplement_mask = (
-            np.isin(datasets, supplements) & (store.temporal_label == 0) & (store.bag_label == 0)
-        )
-        supplement = _apply_limits(store, np.flatnonzero(supplement_mask), config, seed + 19)
-        train = np.sort(np.concatenate((train, supplement))).astype(np.int64)
-    external = np.flatnonzero(
-        (datasets == view["evaluation_dataset"]) & (store.temporal_label >= 0)
-    )
+    external = np.empty(0, dtype=np.int64)
     result = FoldIndices(
         train=train,
         validation=validation,
@@ -307,13 +303,6 @@ def split_indices(
     )
     _assert_split_integrity(store, result, view["objective"])
     return result
-
-
-def _bag_labels(store: UnifiedWindowStore, indices: np.ndarray) -> dict[int, int]:
-    return {
-        int(sequence_id): int(store.sequence_is_fall[sequence_id])
-        for sequence_id in _sequence_ids(store, indices)
-    }
 
 
 def _job_hash(config: dict[str, Any], cache_fingerprint: str, job: Job) -> str:
@@ -377,19 +366,13 @@ def _model_scores(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     spec = config["model_catalog"]["models"][job.model_id]
     params = dict(spec["params"])
-    objective = job.objective
-    external_needed = objective == "recording_mil"
     if job.model_id == "threshold_impact":
         raw = arrays["raw"]
         with phases.track("validation_inference_seconds"):
             validation = threshold_impact_scores(raw[split.validation])
         with phases.track("test_inference_seconds"):
             test = threshold_impact_scores(raw[split.test])
-        external = (
-            threshold_impact_scores(raw[split.external])
-            if external_needed
-            else np.empty(0, dtype=np.float64)
-        )
+        external = np.empty(0, dtype=np.float64)
         return (
             validation,
             test,
@@ -422,7 +405,7 @@ def _model_scores(
             train_values = values[split.train]
             validation_values = values[split.validation]
             test_values = values[split.test]
-            external_values = values[split.external] if external_needed else values[:0]
+            external_values = values[:0]
         with phases.track("normalization_seconds"):
             if already_standardized:
                 if job.input_kind == "raw":
@@ -432,8 +415,6 @@ def _model_scores(
                 train_values = normalize(train_values, mean, scale)
                 validation_values = normalize(validation_values, mean, scale)
                 test_values = normalize(test_values, mean, scale)
-                if external_needed:
-                    external_values = normalize(external_values, mean, scale)
         prepared_cache[context_key] = {
             "train": train_values,
             "validation": validation_values,
@@ -474,11 +455,7 @@ def _model_scores(
                 validation_scores = adapter.predict_proba(validation_values)
             with phases.track("test_inference_seconds"):
                 test_scores = adapter.predict_proba(test_values)
-            external_scores = (
-                adapter.predict_proba(external_values)
-                if external_needed
-                else np.empty(0, dtype=np.float64)
-            )
+            external_scores = np.empty(0, dtype=np.float64)
             return adapter, validation_scores, test_scores, external_scores
         if job.model_id not in SEQUENCE_MODELS:
             raise ValueError(f"Unsupported public model: {job.model_id}")
@@ -493,32 +470,17 @@ def _model_scores(
             execution_mode=effective_mode,
         )
         with phases.track("model_fit_seconds"):
-            if objective == "temporal_supervised":
-                trainer.fit_supervised(
-                    train_values,
-                    store.temporal_label[split.train],
-                    validation_values,
-                    store.temporal_label[split.validation],
-                )
-            else:
-                trainer.fit_mil(
-                    train_values,
-                    store.sequence_index[split.train],
-                    _bag_labels(store, split.train),
-                    validation_values,
-                    store.sequence_index[split.validation],
-                    _bag_labels(store, split.validation),
-                )
+            trainer.fit_supervised(
+                train_values,
+                store.temporal_label[split.train],
+                validation_values,
+                store.temporal_label[split.validation],
+            )
         with phases.track("validation_inference_seconds"):
             validation_scores = trainer.predict_proba(validation_values)
         with phases.track("test_inference_seconds"):
             test_scores = trainer.predict_proba(test_values)
-        with phases.track("external_inference_seconds"):
-            external_scores = (
-                trainer.predict_proba(external_values)
-                if external_needed
-                else np.empty(0, dtype=np.float64)
-            )
+        external_scores = np.empty(0, dtype=np.float64)
         return trainer, validation_scores, test_scores, external_scores
 
     try:
@@ -560,81 +522,39 @@ def _evaluate(
     test_scores: np.ndarray,
     external_scores: np.ndarray,
 ) -> dict[str, Any]:
-    top_fraction = float(config["contract"]["supervision"]["recording"]["mil_top_fraction"])
-    if job.objective == "temporal_supervised":
-        validation_labels = store.temporal_label[split.validation]
-        test_labels = store.temporal_label[split.test]
-        if config["max_sequences_per_split"] is None:
-            # A full run also evaluates fall events that retained no decision window.
-            test_sequence_scope = np.flatnonzero(
-                np.isin(store.dataset_id, config["data_view"]["training_datasets"])
-                & (store.sequence_fold_id == split.test_fold)
-            )
-        else:
-            # A capped smoke run evaluates only the sampled sequence subset.
-            test_sequence_scope = _sequence_ids(store, split.test)
-        threshold, validation_bacc, validation_mcc = best_threshold(
-            validation_labels, validation_scores
-        )
-        return {
-            "selected_threshold": threshold,
-            "threshold_selection": "maximum_validation_balanced_accuracy",
-            "validation_balanced_accuracy": validation_bacc,
-            "validation_mcc": validation_mcc,
-            "test_metrics": binary_classification_metrics(test_labels, test_scores, threshold),
-            "event_metrics": temporal_event_metrics(
-                store,
-                split.test,
-                test_scores,
-                threshold,
-                sequence_scope=test_sequence_scope,
-            ),
-            "subgroup_metrics": subgroup_metrics(store, split.test, test_scores, threshold),
-            "external_metrics": None,
-            "external_event_metrics": None,
-        }
-
-    validation_ids, validation_bag_scores = aggregate_bag_scores(
-        validation_scores, store.sequence_index[split.validation], top_fraction
-    )
-    test_ids, test_bag_scores = aggregate_bag_scores(
-        test_scores, store.sequence_index[split.test], top_fraction
-    )
-    validation_labels = store.sequence_is_fall[validation_ids].astype(np.int8)
-    test_labels = store.sequence_is_fall[test_ids].astype(np.int8)
+    if job.objective != "temporal_supervised":
+        raise ValueError(f"Unsupported objective: {job.objective}")
+    validation_labels = store.temporal_label[split.validation]
+    test_labels = store.temporal_label[split.test]
+    if config["max_sequences_per_split"] is None:
+        # A full run also evaluates fall events that retained no decision window.
+        sequence_filter = config["data_view"]["dataset_filter"]
+        scope = store.sequence_fold_id == split.test_fold
+        if sequence_filter is not None:
+            scope &= np.isin(store.dataset_id, sequence_filter)
+        test_sequence_scope = np.flatnonzero(scope)
+    else:
+        # A capped smoke run evaluates only the sampled sequence subset.
+        test_sequence_scope = _sequence_ids(store, split.test)
     threshold, validation_bacc, validation_mcc = best_threshold(
-        validation_labels, validation_bag_scores
-    )
-    external_ids, external_bag_scores = aggregate_bag_scores(
-        external_scores, store.sequence_index[split.external], top_fraction
-    )
-    external_labels = store.sequence_is_fall[external_ids].astype(np.int8)
-    external_sequence_scope = np.flatnonzero(
-        store.dataset_id == config["data_view"]["evaluation_dataset"]
+        validation_labels, validation_scores
     )
     return {
         "selected_threshold": threshold,
-        "threshold_selection": "maximum_validation_recording_balanced_accuracy",
+        "threshold_selection": "maximum_validation_balanced_accuracy",
         "validation_balanced_accuracy": validation_bacc,
         "validation_mcc": validation_mcc,
-        "test_metrics": binary_classification_metrics(test_labels, test_bag_scores, threshold),
-        "event_metrics": None,
-        "subgroup_metrics": [],
-        "external_metrics": {
-            "recording": binary_classification_metrics(
-                external_labels, external_bag_scores, threshold
-            ),
-            "window": binary_classification_metrics(
-                store.temporal_label[split.external], external_scores, threshold
-            ),
-        },
-        "external_event_metrics": temporal_event_metrics(
+        "test_metrics": binary_classification_metrics(test_labels, test_scores, threshold),
+        "event_metrics": temporal_event_metrics(
             store,
-            split.external,
-            external_scores,
+            split.test,
+            test_scores,
             threshold,
-            sequence_scope=external_sequence_scope,
+            sequence_scope=test_sequence_scope,
         ),
+        "subgroup_metrics": subgroup_metrics(store, split.test, test_scores, threshold),
+        "external_metrics": None,
+        "external_event_metrics": None,
     }
 
 

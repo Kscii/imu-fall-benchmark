@@ -1,0 +1,8 @@
+schema_version: 2
+id: all_temporal_v1
+objective: temporal_supervised
+research_only: false
+supervision_kind: temporal
+dataset_filter: null
+include_training_only: true
+evaluation_policy: combined_cross_validation_with_dataset_subgroups

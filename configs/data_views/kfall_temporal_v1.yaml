@@ -1,8 +1,0 @@
-schema_version: 1
-id: kfall_temporal_v1
-objective: temporal_supervised
-research_only: false
-training_datasets:
-  - kfall
-negative_supplement_datasets: []
-evaluation_dataset: kfall

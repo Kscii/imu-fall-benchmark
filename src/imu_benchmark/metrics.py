@@ -33,12 +33,16 @@ def binary_classification_metrics(
         "n": len(truth),
         "positive": int(np.count_nonzero(truth)),
         "accuracy": float(accuracy_score(truth, predictions)),
-        "balanced_accuracy": float(balanced_accuracy_score(truth, predictions)),
+        "balanced_accuracy": (
+            float(balanced_accuracy_score(truth, predictions))
+            if has_both
+            else float("nan")
+        ),
         "sensitivity": float(recall_score(truth, predictions, zero_division=0)),
         "specificity": float(tn / (tn + fp)) if tn + fp else 0.0,
         "precision": float(precision_score(truth, predictions, zero_division=0)),
         "f1": float(f1_score(truth, predictions, zero_division=0)),
-        "mcc": float(matthews_corrcoef(truth, predictions)),
+        "mcc": float(matthews_corrcoef(truth, predictions)) if has_both else float("nan"),
         "auroc": float(roc_auc_score(truth, values)) if has_both else float("nan"),
         "auprc": float(average_precision_score(truth, values)) if has_both else float("nan"),
         "tn": int(tn),
@@ -102,8 +106,7 @@ def temporal_event_metrics(
     false_windows, negative_hours, false_per_hour = false_positive_windows_per_hour(
         joined,
         threshold=threshold,
-        stride_samples=int(store.manifest["stride_samples"]),
-        sampling_rate_hz=float(store.manifest["sampling_rate_hz"]),
+        stride_seconds=float(store.manifest["stride_seconds"]),
     )
     latency = np.asarray(onset_latency, dtype=np.float64)
     impact = np.asarray(impact_offset, dtype=np.float64)

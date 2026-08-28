@@ -1,234 +1,149 @@
 # IMU Fall Benchmark
 
-This repository is a self-contained WSL2/CUDA benchmark for six-axis IMU fall detection. It
-versions nine HDF5 v3 datasets, participant folds, experiment definitions, training code, and
-tests needed by another team member to clone the repository and reproduce a run.
+这是一个面向组员内部使用的六轴 IMU 跌倒检测 benchmark。仓库负责版本控制训练代码、数据合同、fold、实验配置、测试和结果格式；HDF5 数据不进入 Git，而是从项目的 Google Cloud Storage（GCS）bucket 下载。
 
-The current primary task is temporally supervised fall-window detection on KFall. UNIVRFall is a
-second, research-only temporal source. Seven recording-labelled datasets remain available for
-explicitly marked research views: they may add non-fall windows to KFall training, or support a
-recording-level Multiple Instance Learning (MIL) experiment. Position classification and the old
-position-model matrix are outside the current public scope.
+当前版本只处理一个任务：使用带时间区间标注的数据训练和评估因果滑动窗口跌倒分类器。位置分类、recording-level MIL、Android 实时告警策略和自动部署不在本仓库当前范围内。
 
-This is a research benchmark, not the Android alert product. It outputs a `fall_score`; the score
-must not be described as a calibrated probability unless a later calibration contract proves it.
+模型输出的 `fall_score` 是分类分数，除非后续单独完成概率校准，否则不能把它描述为“跌倒概率”。
 
-## Reference environment
+## 运行环境
 
-The verified reference host is Windows 11 with WSL2 Ubuntu 22.04.5, an NVIDIA RTX 4070 SUPER
-(12 GB), Python 3.12, CUDA 12.9, RAPIDS 26.08, XGBoost 3.4.0, and PyTorch 2.8.0 CUDA 12.9.
-Compute commands intentionally reject native Linux, macOS, Windows Python, WSL1, and repositories
-stored under `/mnt/`.
+正式训练和评估只支持：
 
-Keep the clone in the WSL Linux filesystem, for example `~/projects/imu-fall-benchmark`. Install
-the NVIDIA display driver on Windows; do not install a second Linux display driver inside WSL.
+- Windows 11 + WSL2；
+- NVIDIA CUDA GPU，参考机器为 RTX 4070 SUPER 12 GB；
+- 仓库位于 WSL 的 Linux 文件系统，例如 `~/projects/imu-fall-benchmark`，不能放在 `/mnt/c`；
+- Python 3.12、CUDA 12.9、RAPIDS 26.08、XGBoost 3.4.0 和 PyTorch 2.8.0。
 
-## First-time setup
+Windows 只需要安装支持 WSL2 的 NVIDIA 驱动，不要在 WSL 内再次安装 Linux 显卡驱动。
+
+## 第一次使用
+
+先在 WSL2 安装最小系统依赖：
 
 ```bash
 sudo apt update
-sudo apt install --yes git git-lfs curl ca-certificates
-
-mkdir -p ~/projects
-cd ~/projects
-git clone <private-repository-url> imu-fall-benchmark
-cd imu-fall-benchmark
-./benchmark setup
+sudo apt install --yes git curl ca-certificates tar
 ```
 
-`setup` pulls and verifies Git LFS objects, installs or reuses a pinned Miniforge toolchain, and
-creates an immutable environment keyed by the dependency manifests. A fresh installation commonly
-takes 20–60 minutes depending on network speed and requires at least 25 GiB free space.
-
-## Normal workflow
-
-Run these commands from the repository root:
+然后把仓库 clone 到 WSL 文件系统并执行：
 
 ```bash
+cd ~/projects/imu-fall-benchmark
+./benchmark setup
+./benchmark data pull
 ./benchmark doctor
-./benchmark test
-./benchmark validate-data
 ./benchmark smoke
 ```
 
-- `doctor` checks WSL2, paths, disk space, CUDA, BF16 support, and all seven public model paths.
-- `test` runs Ruff and pytest inside the same pinned environment.
-- `validate-data` checks Git LFS bytes, HDF5 v3 structure, snapshot hashes, and participant folds.
-- `smoke` runs the default seven-model, fold-0, FP32 KFall experiment and resumes compatible jobs.
+`setup` 会在 `~/imu-fall-work` 中安装或复用固定版本的 Miniforge、Google Cloud CLI 和 CUDA Python 环境，不会修改系统 Python。第一次安装通常需要 20–60 分钟，并建议预留至少 25 GiB 空间。
 
-The first smoke builds a unified derived cache. It reads every source HDF5 once and stores raw
-60×6 windows, 158 engineered features, recording labels, temporal labels, and fold metadata. Cache
-writes are flushed in batches of 16,384 windows. Later runs reuse the content-addressed cache and
-materialise each required input array once per invocation.
+`data pull` 首次执行时会要求登录 Google 账号。它只下载 `current.json` 指向的不可变 snapshot，随后逐文件核对 SHA-256、HDF5 v3.1 结构、逻辑指纹和统计值。仓库不需要 Git LFS。每个 WSL 用户只需登录一次：首次必须在可交互的 WSL 终端直接执行该命令；无 TTY 的 SSH/Codex 自动化不会复制宿主机凭据，也不会在无法输入验证码时继续。登录完成后，后续拉取可以自动运行。
 
-For snapshot v2 on the reference RTX 4070 SUPER machine, the fresh unified cache took 126.6 seconds
-to build for 595,639 windows, and a fully resumed seven-model smoke invocation took 2.75 seconds.
-For comparison, the retired snapshot v1 cache contained 468,728 windows and took 97.2 seconds to
-build. These timings are engineering acceptance evidence, not model-quality evidence.
-
-## Versioned experiments
-
-Experiments are YAML files under `configs/experiments/`. Inspect a plan without starting CUDA work:
+## 日常命令
 
 ```bash
-./benchmark plan configs/experiments/kfall_reproduce_v2.yaml
+./benchmark data status
+./benchmark data pull
+./benchmark validate-data
+./benchmark test
+./benchmark doctor
+./benchmark smoke
 ```
 
-Run and resume the complete five-fold KFall experiment:
+- `data status`：比较本地 active manifest 和远程 current pointer；
+- `data pull`：原子下载和激活最新 base/team snapshot；
+- `validate-data`：检查全部 HDF5、hash、统计值与 participant fold；
+- `test`：执行 Ruff 与 pytest；
+- `doctor`：检查 WSL2、CUDA、GPU 和七种模型后端；
+- `smoke`：运行经过限量的 fold-0 七模型端到端测试，可复用兼容 checkpoint。
+
+## 数据合同
+
+机器可读合同位于 [`configs/contracts/imu_benchmark_contract_v2.json`](configs/contracts/imu_benchmark_contract_v2.json)，关键规则如下：
+
+- HDF5 schema：`3.1.0`；
+- 输入：25 Hz、六轴 IMU、`float32`、sensor-local 坐标系、保留重力；
+- 窗口：50 帧，即 2 秒；
+- 步长：物理时间 0.5 秒；在 25 Hz 上使用 half-up 网格，起点为 `0, 13, 25, 38, ...`；
+- 决策时间：窗口最后一帧；
+- 正样本：决策时间落在半开跌倒区间 `[fall_start, fall_stop)` 内；
+- 与明确 `exclude` 区间相交的窗口会被排除；
+- 已经越过跌倒区间终点、但仍包含跌倒尾部的窗口会被排除，避免用跌倒后的信息制造负样本；
+- 当前事件检测规则：一个正窗口即视为检测到该跌倒。N-of-M、冷却时间和告警合并属于后续产品策略实验。
+
+原始 public snapshot 包含 9 个 HDF5 shard。KFall 和 UNIVRFall 提供可用的跌倒时间区间；只有 recording 标注的数据中，ADL recording 可以提供负窗口，但 fall recording 因缺少区间不会被当作时序正样本。后续标注平台产生的 CW12EU 数据必须包含时序区间。
+
+## Fold 与 team 数据
+
+公共数据使用固定的 participant-disjoint 五折：测试 fold 为 `k`，验证 fold 为 `(k + 1) mod 5`，其余三折训练。阈值只根据验证 fold 的 Balanced Accuracy 选择。
+
+标注平台持续产生的 team snapshot 使用 `fold_id = -1`：
+
+- 可以加入每个 fold 的训练集；
+- 永远不能进入验证集或测试集；
+- 这样有限的内部设备数据可帮助训练，但不会让模型在自己见过的 participant/recording 上得到虚高的评估结果。
+
+任何数据 snapshot、fold、合同或实验配置变化都会改变 cache/run 指纹。旧 run 不会被静默复用。
+
+## 实验配置
+
+当前保留三种入口：
+
+| 配置 | 用途 |
+|---|---|
+| `temporal_smoke_v1.yaml` | 限量端到端检查，不作为模型结论 |
+| `kfall_fold0_regression_v1.yaml` | KFall 单折完整回归参考 |
+| `all_temporal_fold0_pilot_v1.yaml` | 全部可用时序数据的单折工程 pilot |
+
+先查看计划，再运行：
 
 ```bash
-./benchmark run configs/experiments/kfall_reproduce_v2.yaml --resume
+./benchmark plan configs/experiments/all_temporal_fold0_pilot_v1.yaml
+./benchmark run configs/experiments/all_temporal_fold0_pilot_v1.yaml --resume
 ```
 
-Regenerate a report without retraining:
+七种模型为 Threshold Impact、cuML Logistic Regression、cuML Random Forest、CUDA XGBoost、PyTorch 1D CNN、PyTorch LSTM 和 PyTorch CNN-LSTM。三个表格模型读取 158 个工程特征；三个深度时序模型读取 `50 × 6` 原始窗口；Threshold Impact 直接读取原始窗口。
 
-```bash
-./benchmark report <run-id>
-```
+所有配置都固定 fold、seed、精度、epoch/patience 与数据合同。单 fold pilot 是工程证据，不等于最终多折模型验证。
 
-Before a formal five-fold experiment, use the two full-data fold-0 engineering pilots:
+## 输出和恢复
 
-```bash
-./benchmark run configs/experiments/kfall_fold0_pilot_fp32_v2.yaml --resume
-./benchmark run configs/experiments/kfall_fold0_pilot_bf16_v2.yaml --resume
-```
-
-Run FP32 first. The BF16 pilot contains only the three PyTorch sequence models and is comparable
-only with those same models in the FP32 pilot: both configurations fix fold 0, seed 3888, the full
-KFall split, 50 maximum epochs, and patience 8. These pilots check full-scale execution,
-checkpointing, performance, and numerical sanity. A single provisional fold is not formal
-model-validation evidence.
-
-The snapshot v2 FP32 pilot took 39.8 seconds. Six models reproduced the v1 test metrics exactly;
-cuML Logistic Regression changed Balanced Accuracy from 0.94523 to 0.94514 while converging at the
-same 263 iterations. The KFall raw windows and 158 features were byte-identical between caches, so
-this small change is recorded as GPU solver numerical variation rather than data drift.
-
-The retired snapshot v1 BF16 pilot took 59.4 seconds and was not a general speed-up: compared with
-FP32, model fit was about 4% slower for 1D CNN, 50% faster for LSTM, and 8 times slower for
-CNN-LSTM. Because early-stopping trajectories also differed, these are end-to-end engineering
-timings rather than fixed-epoch kernel benchmarks. BF16 was not rerun for snapshot v2, and FP32
-remains the default until a separate profiling task justifies a model-specific precision policy.
-
-The configuration is split deliberately into three small layers:
-
-- `configs/experiments/`: folds, seeds, precision, GPU mode, training limits, and selected models;
-- `configs/data_views/`: which datasets may train, supplement, and evaluate a model;
-- `configs/models/`: the seven public model definitions and fixed hyperparameters.
-
-The main data views are:
-
-| Data view | Training | Validation/test | Status |
-|---|---|---|---|
-| `kfall_temporal_v1` | temporally labelled KFall windows | participant-disjoint KFall | primary |
-| `univrfall_temporal_v1` | temporally labelled UNIVRFall windows | participant-disjoint UNIVRFall | research-only smoke |
-| `kfall_public_adl_v2` | KFall plus non-fall windows from the other datasets | KFall only | research only |
-| `public_recording_mil_v2` | seven recording-labelled datasets | public folds plus frozen KFall transfer | research only |
-
-For fold `k`, fold `k` is test, fold `(k + 1) mod 5` is validation, and the remaining three folds
-train the model. Threshold selection uses validation Balanced Accuracy only. Updating the dataset
-snapshot therefore requires rerunning every affected experiment; old run directories remain tied
-to their original config and cache fingerprints.
-
-Experiments have no total wall-clock budget. Every iterative model has an explicit iteration or
-epoch limit, and PyTorch models also use validation early stopping. Interrupting a run with
-`Ctrl+C` is safe: each completed job is written atomically, and `--resume` reuses only compatible
-checkpoints. An interrupted in-progress job starts again from the beginning.
-
-## Models and precision
-
-The public model set is:
-
-1. Threshold Impact baseline;
-2. cuML Logistic Regression;
-3. cuML Random Forest;
-4. CUDA XGBoost;
-5. PyTorch 1D CNN;
-6. PyTorch LSTM;
-7. PyTorch CNN-LSTM.
-
-Tabular models use the 158 engineered features. Sequence models read the 60×6 raw window. FP32 is
-the default. BF16 is available only for PyTorch forward and loss computation; source arrays,
-normalisation statistics, thresholds, and reported scores remain FP32 or float64 as appropriate.
-Compare BF16 only against a run with the same data view, fold, seed, sampling, and model settings.
-
-Logistic Regression has a fixed 500-iteration limit. Its public cuML `n_iter_` value is stored as
-machine-readable `optimization` metadata in the job checkpoint. Reaching the limit is treated as
-a failed job instead of silently accepting a potentially unconverged model or retrying with a
-different configuration.
-
-`gpu_mode` can be `auto`, `resident`, or `streaming`. Auto mode reserves the larger of 4 GiB or
-40% of total VRAM, then keeps prepared tensors resident only if the estimate fits. Streaming uses
-pinned host memory and asynchronous batch transfers. A resident allocation OOM in auto mode is
-retried once in streaming mode and recorded in job metadata; forced resident mode fails rather
-than silently changing policy. The two sequence-only acceptance configs make both paths directly
-testable.
-
-## Fixed data and window contract
-
-- Input: 30 Hz, six axes, gravity retained, sensor-local axes.
-- Window: 60 frames (2 seconds), stride 15 frames (0.5 seconds), causal decision at the last frame.
-- Temporal positive: the decision frame is inside the fall activity half-open interval.
-- Temporal exclusion: explicit exclude overlap and post-segment overlap are removed.
-- Recording MIL: the mean of the highest-scoring 10% of windows is the recording score.
-- Alarm policy: one above-threshold window detects an event; alert merging and N-of-M are future
-  product-policy experiments.
-- Seed: `3888` by default; PyTorch deterministic algorithms are enabled.
-
-The machine-readable protocol is
-[`configs/contracts/imu_benchmark_contract_v1.json`](configs/contracts/imu_benchmark_contract_v1.json).
-The immutable nine-file snapshot is [`data/snapshot_v2.json`](data/snapshot_v2.json). Experiment
-YAML cannot override contract-owned sampling, window, label, or metric rules.
-
-Only the latest snapshot is supported by the current source tree. Snapshot v1 configuration and
-split files have been retired; reproducing a historical v1 run requires checking out the commit
-that contains the v1 code and manifests. Existing external run directories remain immutable.
-
-KFall currently remains `provisional_kfall_adapter_v1`: onset and impact may be shifted by one
-30 Hz sample, ADL codes are placeholders, and the fall activity tail ends one second after impact.
-The unified cache enforces the current regression of 53,365 KFall windows, including 8,027 positive
-and 45,338 negative windows. Until the adapter is corrected and re-versioned, runs are implementation
-and exploration evidence rather than formal model-validation evidence.
-
-## Metrics and artefacts
-
-Each run records Balanced Accuracy, sensitivity, specificity, precision, F1, MCC, AUROC, AUPRC,
-and confusion counts. Temporal runs also record event sensitivity, ADL false-positive decision
-windows per hour, and onset/impact-relative latency. Dataset and body-location subgroup CSVs are
-generated when those groups exist in the selected test view.
-
-In result CSV files, `compute_precision` is the execution mode (`fp32` or `bf16`), while
-`precision` is the positive predictive value classification metric.
-
-Stable run IDs are derived from the resolved configuration and data-cache fingerprint. Outputs are
-written below `~/imu-fall-work/runs/<run-id>/` by default:
+默认生成内容全部保存在仓库外：
 
 ```text
-resolved_config.yaml
-environment.json
-provenance.json
-plan.json
-events.jsonl
-jobs/*.npz
-metrics.csv
-event_metrics.csv
-subgroup_metrics.csv
-external_metrics.csv
-performance.json
-run_manifest.json
-report.md
+~/imu-fall-work/
+├── data/                 # 已验证的 immutable snapshots 与 active.json
+├── cache/                # 50×6 窗口和 158 特征的内容寻址缓存
+├── envs/                 # 固定依赖环境
+├── runs/<run-id>/        # 配置、checkpoint、指标、日志和报告
+└── toolchains/           # Miniforge 与 Google Cloud CLI
 ```
 
-Job checkpoints have their own compatibility schema, separate from report and execution-engine
-schemas. A schema or model/config change invalidates incompatible jobs while leaving older run
-directories intact. Each trainable job records `optimization` metadata when the backend exposes a
-reliable convergence signal; unsupported models store no inferred convergence claim.
+可以把 `IMU_BENCH_WORK_ROOT` 设置为其他绝对路径。每个 job 完成后会原子写入 checkpoint；中断后使用 `--resume`，只会复用配置和数据指纹完全一致的结果。
 
-`subgroup_metrics.csv` and `external_metrics.csv` are emitted only when the selected data view
-produces those result scopes.
+主要输出包括 `resolved_config.yaml`、`environment.json`、`provenance.json`、`events.jsonl`、`jobs/*.npz`、`metrics.csv`、`event_metrics.csv`、`subgroup_metrics.csv`、`performance.json` 和 `report.md`。
 
-Set `IMU_BENCH_WORK_ROOT` to an absolute path to move both cache and run output. Keeping generated
-state outside the clone allows source snapshots to be replaced without losing resumable jobs.
+## 数据发布结构
 
-See [`data/README.md`](data/README.md) for dataset sources, fields, supervision boundaries, and how
-to add a future HDF5 v3 dataset.
+默认 bucket 为 `gs://soft3888-label`，也可通过 `IMU_BENCH_DATA_BUCKET=gs://bucket-name` 覆盖。benchmark 只使用以下前缀：
+
+```text
+benchmark-datasets/
+├── base/<snapshot-id>/datasets/*.h5
+├── base/<snapshot-id>/manifest.json
+├── base/current.json
+├── team/cw12eu/<snapshot-id>/datasets/*.h5
+├── team/cw12eu/<snapshot-id>/manifest.json
+└── team/cw12eu/current.json
+```
+
+snapshot 对象不可覆盖；`current.json` 只是一个小型显式指针。发布公共 base 是维护操作：
+
+```bash
+./benchmark data publish-base --source-dir /path/to/reviewed/imu_25hz
+```
+
+日常用户只执行 `data pull`，不需要 bucket 写权限。任何凭据、登录缓存、HDF5、运行结果和本地 `TODO.md` 都不能提交到 Git。
+
+协作规则见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。

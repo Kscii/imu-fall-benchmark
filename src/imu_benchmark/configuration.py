@@ -11,10 +11,11 @@ import yaml
 from .contract import (
     DEFAULT_CONTRACT_PATH,
     DEFAULT_SNAPSHOT_PATH,
+    default_active_snapshot_path,
     load_contract_snapshot,
 )
 
-CONFIG_SCHEMA_VERSION = 1
+CONFIG_SCHEMA_VERSION = 2
 PUBLIC_MODEL_IDS = (
     "threshold_impact",
     "cuml_logistic_regression",
@@ -24,7 +25,7 @@ PUBLIC_MODEL_IDS = (
     "torch_lstm",
     "torch_cnn_lstm",
 )
-OBJECTIVES = ("temporal_supervised", "recording_mil")
+OBJECTIVES = ("temporal_supervised",)
 GPU_MODES = ("auto", "resident", "streaming")
 PRECISIONS = ("fp32", "bf16")
 
@@ -67,7 +68,7 @@ def canonical_sha256(payload: object) -> str:
 
 def _validate_model_catalog(payload: dict[str, Any]) -> None:
     _exact_keys(payload, {"schema_version", "models"}, "model catalog")
-    if payload["schema_version"] != CONFIG_SCHEMA_VERSION:
+    if payload["schema_version"] != 1:
         raise ValueError("Unsupported model catalog schema")
     models = payload["models"]
     if not isinstance(models, dict) or set(models) != set(PUBLIC_MODEL_IDS):
@@ -96,9 +97,10 @@ def _validate_data_view(payload: dict[str, Any]) -> None:
             "id",
             "objective",
             "research_only",
-            "training_datasets",
-            "negative_supplement_datasets",
-            "evaluation_dataset",
+            "supervision_kind",
+            "dataset_filter",
+            "include_training_only",
+            "evaluation_policy",
         },
         "data view",
     )
@@ -106,18 +108,20 @@ def _validate_data_view(payload: dict[str, Any]) -> None:
         raise ValueError("Unsupported data-view schema")
     if payload["objective"] not in OBJECTIVES:
         raise ValueError("Unsupported data-view objective")
-    for name in ("training_datasets", "negative_supplement_datasets"):
-        values = payload[name]
-        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
-            raise ValueError(f"{name} must be a list of dataset IDs")
-        if len(values) != len(set(values)):
-            raise ValueError(f"{name} contains duplicate dataset IDs")
-    if not payload["training_datasets"]:
-        raise ValueError("A data view requires at least one training dataset")
-    if set(payload["training_datasets"]) & set(payload["negative_supplement_datasets"]):
-        raise ValueError("Primary and supplement datasets must be disjoint")
-    if payload["objective"] == "temporal_supervised" and payload["evaluation_dataset"] != "kfall":
-        raise ValueError("The current temporal-supervised view must evaluate on KFall")
+    if payload["supervision_kind"] != "temporal":
+        raise ValueError("The public benchmark supports temporal supervision only")
+    dataset_filter = payload["dataset_filter"]
+    if dataset_filter is not None and (
+        not isinstance(dataset_filter, list)
+        or not dataset_filter
+        or any(not isinstance(value, str) or not value for value in dataset_filter)
+        or len(dataset_filter) != len(set(dataset_filter))
+    ):
+        raise ValueError("dataset_filter must be null or a unique non-empty ID list")
+    if not isinstance(payload["include_training_only"], bool):
+        raise ValueError("include_training_only must be boolean")
+    if payload["evaluation_policy"] != "combined_cross_validation_with_dataset_subgroups":
+        raise ValueError("Unsupported evaluation policy")
     if not isinstance(payload["research_only"], bool):
         raise ValueError("research_only must be boolean")
 
@@ -170,9 +174,11 @@ def _validate_experiment(payload: dict[str, Any]) -> None:
         if not isinstance(payload[name], int) or payload[name] <= 0:
             raise ValueError(f"{name} must be a positive integer")
     if payload["cache_flush_windows"] != 16_384:
-        raise ValueError("Cache schema v3 fixes cache_flush_windows at 16384")
+        raise ValueError("Cache schema fixes cache_flush_windows at 16384")
     for name in ("max_sequences_per_split", "max_windows_per_sequence"):
-        if payload[name] is not None and (not isinstance(payload[name], int) or payload[name] <= 0):
+        if payload[name] is not None and (
+            not isinstance(payload[name], int) or payload[name] <= 0
+        ):
             raise ValueError(f"{name} must be null or a positive integer")
     if not isinstance(payload["known_limitations"], list) or any(
         not isinstance(item, str) for item in payload["known_limitations"]
@@ -180,7 +186,12 @@ def _validate_experiment(payload: dict[str, Any]) -> None:
         raise ValueError("known_limitations must be a list of strings")
 
 
-def load_experiment(project_root: Path, path: Path) -> dict[str, Any]:
+def load_experiment(
+    project_root: Path,
+    path: Path,
+    *,
+    snapshot_path: Path | None = None,
+) -> dict[str, Any]:
     resolved_path = path.resolve()
     config_root = (project_root / "configs/experiments").resolve()
     if config_root not in resolved_path.parents:
@@ -188,10 +199,14 @@ def load_experiment(project_root: Path, path: Path) -> dict[str, Any]:
     experiment = _read_yaml(resolved_path)
     _validate_experiment(experiment)
     if Path(str(experiment["contract_path"])) != DEFAULT_CONTRACT_PATH:
-        raise ValueError("Experiment must use the canonical contract-v1 path")
+        raise ValueError("Experiment must use the canonical contract-v2 path")
     if Path(str(experiment["snapshot_path"])) != DEFAULT_SNAPSHOT_PATH:
-        raise ValueError("Experiment must use snapshot-v2")
-    contract, snapshot, contract_hash, snapshot_hash = load_contract_snapshot(project_root)
+        raise ValueError("Experiment must resolve the active data manifest")
+    active_path = default_active_snapshot_path() if snapshot_path is None else snapshot_path
+    contract, snapshot, contract_hash, snapshot_hash = load_contract_snapshot(
+        project_root,
+        snapshot_path=active_path,
+    )
     model_path = _project_path(
         project_root, experiment["model_catalog_path"], parent="model_catalog_path"
     )
@@ -210,11 +225,6 @@ def load_experiment(project_root: Path, path: Path) -> dict[str, Any]:
         spec["backend"] != "pytorch" for spec in selected_specs
     ):
         raise ValueError("BF16 experiments may select PyTorch models only")
-    if data_view["objective"] == "recording_mil" and any(
-        model_id not in {"threshold_impact", "torch_1d_cnn", "torch_lstm", "torch_cnn_lstm"}
-        for model_id in experiment["models"]
-    ):
-        raise ValueError("The recording-MIL research view supports threshold and sequence models")
     resolved = deepcopy(experiment)
     resolved.update(
         {
@@ -230,6 +240,7 @@ def load_experiment(project_root: Path, path: Path) -> dict[str, Any]:
         }
     )
     resolved["resolved_config_sha256"] = canonical_sha256(resolved)
+    resolved["active_data_root"] = str(active_path.parent.resolve())
     return resolved
 
 
@@ -237,4 +248,5 @@ def public_config(payload: dict[str, Any]) -> dict[str, Any]:
     result = deepcopy(payload)
     result.pop("contract", None)
     result.pop("snapshot", None)
+    result.pop("active_data_root", None)
     return result

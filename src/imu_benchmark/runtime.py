@@ -26,6 +26,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 @dataclass(frozen=True, slots=True)
 class WorkPaths:
     root: Path
+    data: Path
     cache: Path
     runs: Path
 
@@ -59,7 +60,12 @@ def resolve_work_paths() -> WorkPaths:
     if not root.is_absolute():
         raise ValueError("IMU_BENCH_WORK_ROOT must be an absolute path")
     root = root.resolve()
-    return WorkPaths(root=root, cache=root / "cache", runs=root / "runs")
+    return WorkPaths(
+        root=root,
+        data=root / "data",
+        cache=root / "cache",
+        runs=root / "runs",
+    )
 
 
 def _unknown_source(*warnings: str) -> tuple[dict[str, Any], list[str]]:
