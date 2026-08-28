@@ -16,7 +16,6 @@ folds: [0, 1, 2, 3, 4]
 seeds: [3888]
 precision: fp32
 gpu_mode: auto
-runtime_budget_seconds: 10800
 max_epochs: 50
 patience: 8
 max_sequences_per_split: null

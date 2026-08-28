@@ -137,7 +137,6 @@ def _validate_experiment(payload: dict[str, Any]) -> None:
             "seeds",
             "precision",
             "gpu_mode",
-            "runtime_budget_seconds",
             "max_epochs",
             "patience",
             "max_sequences_per_split",
@@ -167,7 +166,7 @@ def _validate_experiment(payload: dict[str, Any]) -> None:
         raise ValueError("Experiment seeds must be a non-empty integer list")
     if len(seeds) != len(set(seeds)):
         raise ValueError("Experiment seeds must be unique")
-    for name in ("runtime_budget_seconds", "max_epochs", "patience", "cache_flush_windows"):
+    for name in ("max_epochs", "patience", "cache_flush_windows"):
         if not isinstance(payload[name], int) or payload[name] <= 0:
             raise ValueError(f"{name} must be a positive integer")
     if payload["cache_flush_windows"] != 16_384:

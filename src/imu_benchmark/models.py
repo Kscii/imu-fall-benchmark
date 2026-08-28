@@ -16,6 +16,10 @@ from .specs import MODEL_SPECS
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 
+class ModelConvergenceError(RuntimeError):
+    """Raised when an iterative model reaches its configured limit."""
+
+
 class CudaScaler:
     def __init__(self) -> None:
         self.mean: Any | None = None
@@ -77,6 +81,9 @@ class ModelAdapter(ABC):
         except (TypeError, pickle.PickleError):
             return None
 
+    def optimization_metadata(self) -> dict[str, int | bool] | None:
+        return None
+
 
 class CuMLAdapter(ModelAdapter):
     def __init__(self, model_id: str, params: dict[str, Any], *, random_seed: int) -> None:
@@ -121,6 +128,7 @@ class CuMLAdapter(ModelAdapter):
         gpu_features, gpu_labels = self._training_arrays(features, labels)
         self.estimator = self._make_estimator()
         self.estimator.fit(gpu_features, gpu_labels)
+        self.assert_optimization_converged()
         if self.model_id == "cuml_rbf_svc":
             from cuml.linear_model import LogisticRegression
 
@@ -158,6 +166,27 @@ class CuMLAdapter(ModelAdapter):
             self.calibrator is None or not self.calibrator.__class__.__module__.startswith("cuml.")
         ):
             raise CudaUnavailable("RBF SVC probability calibration is not direct cuML")
+
+    def optimization_metadata(self) -> dict[str, int | bool] | None:
+        if self.model_id != "cuml_logistic_regression":
+            return None
+        if self.estimator is None or not hasattr(self.estimator, "n_iter_"):
+            raise RuntimeError("Logistic Regression iteration state is unavailable")
+        iterations = int(np.asarray(self.estimator.n_iter_).reshape(-1)[0])
+        iteration_limit = int(self.params["max_iter"])
+        return {
+            "converged": iterations < iteration_limit,
+            "iterations": iterations,
+            "iteration_limit": iteration_limit,
+        }
+
+    def assert_optimization_converged(self) -> None:
+        optimization = self.optimization_metadata()
+        if optimization is not None and not optimization["converged"]:
+            raise ModelConvergenceError(
+                f"{self.model_id} reached its iteration limit: "
+                f"{optimization['iterations']}/{optimization['iteration_limit']}"
+            )
 
 
 class XGBoostCudaAdapter(ModelAdapter):

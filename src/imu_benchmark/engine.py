@@ -43,7 +43,8 @@ from .window_cache import (
     prepare_unified_window_store,
 )
 
-ENGINE_SCHEMA_VERSION = 3
+ENGINE_SCHEMA_VERSION = 4
+JOB_CHECKPOINT_SCHEMA_VERSION = 1
 TABULAR_MODELS = (
     "cuml_logistic_regression",
     "cuml_random_forest",
@@ -160,6 +161,7 @@ def plan_experiment(config: dict[str, Any]) -> dict[str, Any]:
     validation = {fold: (fold + 1) % 5 for fold in config["folds"]}
     return {
         "engine_schema_version": ENGINE_SCHEMA_VERSION,
+        "job_checkpoint_schema_version": JOB_CHECKPOINT_SCHEMA_VERSION,
         "experiment_id": config["id"],
         "resolved_config_sha256": config["resolved_config_sha256"],
         "data_view": config["data_view"],
@@ -316,7 +318,7 @@ def _bag_labels(store: UnifiedWindowStore, indices: np.ndarray) -> dict[int, int
 
 def _job_hash(config: dict[str, Any], cache_fingerprint: str, job: Job) -> str:
     payload = {
-        "engine_schema_version": ENGINE_SCHEMA_VERSION,
+        "job_checkpoint_schema_version": JOB_CHECKPOINT_SCHEMA_VERSION,
         "performance_schema_version": PERFORMANCE_SCHEMA_VERSION,
         "resolved_config_sha256": config["resolved_config_sha256"],
         "cache_fingerprint": cache_fingerprint,
@@ -402,6 +404,7 @@ def _model_scores(
                     "reason": "threshold_baseline_has_no_trainable_gpu_model",
                 },
                 "fallback": None,
+                "optimization": None,
             },
         )
 
@@ -538,6 +541,11 @@ def _model_scores(
         "model_size_bytes": adapter.serialized_size(),
         "execution": {**decision.to_dict(), "effective_mode": mode},
         "fallback": fallback,
+        "optimization": (
+            adapter.optimization_metadata()
+            if hasattr(adapter, "optimization_metadata")
+            else None
+        ),
     }
     return validation, test, external, metadata
 
@@ -694,6 +702,7 @@ def _run_job(
         peak = monitor.stop() if monitor is not None else 0
         stopped_core = time.perf_counter()
         metadata = {
+            "job_checkpoint_schema_version": JOB_CHECKPOINT_SCHEMA_VERSION,
             "job": asdict(job),
             "job_key": job.key,
             "job_hash": expected_hash,
@@ -886,16 +895,6 @@ def run_experiment(
     try:
         with phases.track("job_execution_seconds"):
             for position, job in enumerate(jobs, start=1):
-                elapsed = time.perf_counter() - started
-                if elapsed >= float(config["runtime_budget_seconds"]):
-                    failure = {
-                        "status": "not_started",
-                        "reason": "runtime_budget_exhausted",
-                        "job": asdict(job),
-                    }
-                    failures.append(failure)
-                    _event(event_path, "job_skipped", **failure)
-                    continue
                 _event(event_path, "job_started", job=asdict(job), position=position)
                 try:
                     result = _run_job(
@@ -940,42 +939,44 @@ def run_experiment(
     finally:
         telemetry.stop()
     completed_at = time.perf_counter()
+    summary = {
+        "engine_schema_version": ENGINE_SCHEMA_VERSION,
+        "job_checkpoint_schema_version": JOB_CHECKPOINT_SCHEMA_VERSION,
+        "run_id": run_id,
+        "experiment_id": config["id"],
+        "status": "PASS" if not failures else "PARTIAL",
+        "scheduled_jobs": len(jobs),
+        "completed_jobs": len(results),
+        "computed_jobs_this_invocation": sum(
+            result["status"] == "computed" for result in results
+        ),
+        "cached_jobs_this_invocation": sum(result["status"] == "cached" for result in results),
+        "failures": failures,
+        "data_view_id": config["data_view"]["id"],
+        "research_only": config["data_view"]["research_only"],
+        "data_quality_status": config["data_quality_status"],
+        "precision": config["precision"],
+        "gpu_mode": config["gpu_mode"],
+        "known_limitations": config["known_limitations"],
+        "source": source,
+        "warnings": warnings,
+        "cache_manifest": cache_manifest,
+        "job_execution_elapsed_seconds": completed_at - started,
+    }
     with phases.track("report_generation_seconds"):
-        summary = {
-            "engine_schema_version": ENGINE_SCHEMA_VERSION,
-            "run_id": run_id,
-            "experiment_id": config["id"],
-            "status": "PASS" if not failures else "PARTIAL",
-            "scheduled_jobs": len(jobs),
-            "completed_jobs": len(results),
-            "computed_jobs_this_invocation": sum(
-                result["status"] == "computed" for result in results
-            ),
-            "cached_jobs_this_invocation": sum(result["status"] == "cached" for result in results),
-            "failures": failures,
-            "data_view_id": config["data_view"]["id"],
-            "research_only": config["data_view"]["research_only"],
-            "data_quality_status": config["data_quality_status"],
-            "precision": config["precision"],
-            "gpu_mode": config["gpu_mode"],
-            "known_limitations": config["known_limitations"],
-            "source": source,
-            "warnings": warnings,
-            "cache_manifest": cache_manifest,
-            "elapsed_seconds": completed_at - invocation_started,
-        }
         _write_report(run_dir, summary, results)
-        performance = build_performance_report(
-            invocation_phases=phases.to_dict(),
-            results=results,
-            process_usage=process_delta(process_started, process_snapshot()),
-            gpu_telemetry=telemetry.summary(started, completed_at),
-            cache_manifests={"unified": cache_manifest},
-        )
-        _atomic_json(run_dir / "performance.json", performance)
-        summary["performance_path"] = str(run_dir / "performance.json")
-        summary["report_path"] = str(run_dir / "report.md")
-        _atomic_json(run_dir / "run_manifest.json", summary)
+    summary["elapsed_seconds"] = time.perf_counter() - invocation_started
+    performance = build_performance_report(
+        invocation_phases=phases.to_dict(),
+        results=results,
+        process_usage=process_delta(process_started, process_snapshot()),
+        gpu_telemetry=telemetry.summary(started, completed_at),
+        cache_manifests={"unified": cache_manifest},
+    )
+    _atomic_json(run_dir / "performance.json", performance)
+    summary["performance_path"] = str(run_dir / "performance.json")
+    summary["report_path"] = str(run_dir / "report.md")
+    _atomic_json(run_dir / "run_manifest.json", summary)
     _event(event_path, "run_finished", status=summary["status"])
     return summary
 

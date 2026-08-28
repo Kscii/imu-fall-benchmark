@@ -12,7 +12,6 @@ folds: [0]
 seeds: [3888]
 precision: fp32
 gpu_mode: streaming
-runtime_budget_seconds: 900
 max_epochs: 2
 patience: 1
 max_sequences_per_split: 600

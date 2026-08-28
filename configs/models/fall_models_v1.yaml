@@ -14,7 +14,7 @@ models:
     params:
       C: 1.0
       penalty: l2
-      max_iter: 50
+      max_iter: 500
   cuml_random_forest:
     backend: cuml
     input_kind: features

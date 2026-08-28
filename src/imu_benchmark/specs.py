@@ -84,7 +84,7 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         standardize=True,
         C=1.0,
         penalty="l2",
-        max_iter=50,
+        max_iter=500,
     ),
     "cuml_random_forest": _tabular(
         "cuml_random_forest",

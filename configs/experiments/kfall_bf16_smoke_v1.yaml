@@ -12,7 +12,6 @@ folds: [0]
 seeds: [3888]
 precision: bf16
 gpu_mode: auto
-runtime_budget_seconds: 900
 max_epochs: 2
 patience: 1
 max_sequences_per_split: 600
