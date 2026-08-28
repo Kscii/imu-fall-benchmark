@@ -8,7 +8,7 @@ import h5py
 import numpy as np
 import pytest
 
-from imu_benchmark.contract import load_contract_bundle
+from imu_benchmark.contract import load_contract_bundle, load_contract_snapshot
 from imu_benchmark.data import FEATURE_NAMES, extract_window_features
 from imu_benchmark.dataset import FEATURE_COLUMNS, FEATURE_UNITS, Annotation, validate_hdf5_file
 from imu_benchmark.evaluation import false_positive_windows_per_hour
@@ -26,16 +26,15 @@ def _annotations() -> tuple[Annotation, ...]:
     return tuple(Annotation(**item) for item in FIXTURE["temporal"]["annotations"])
 
 
-def test_contract_bundle_is_single_protocol_source() -> None:
-    bundle = load_contract_bundle(PROJECT_ROOT / "configs/data_contract_v1_validation.json")
-    effective = bundle.effective_values()
-    assert effective["contract_version"] == "imu_benchmark_contract_v1"
-    assert effective["snapshot_version"] == "imu_30hz_snapshot_v1"
-    assert effective["sampling_rate_hz"] == 30
-    assert effective["window_samples"] == 60
-    assert effective["stride_samples"] == 15
-    assert len(effective["contract_sha256"]) == 64
-    assert len(effective["snapshot_sha256"]) == 64
+def test_contract_and_snapshot_are_single_protocol_source() -> None:
+    contract, snapshot, contract_hash, snapshot_hash = load_contract_snapshot(PROJECT_ROOT)
+    assert contract["contract_version"] == "imu_benchmark_contract_v1"
+    assert snapshot["snapshot_version"] == "imu_30hz_snapshot_v1"
+    assert contract["canonical_signal"]["sampling_rate_hz"] == 30
+    assert contract["window"]["samples"] == 60
+    assert contract["window"]["stride_samples"] == 15
+    assert len(contract_hash) == 64
+    assert len(snapshot_hash) == 64
 
 
 def test_experiment_cannot_override_protocol_fields(tmp_path: Path) -> None:

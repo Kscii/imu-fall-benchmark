@@ -278,9 +278,6 @@ def prepare_unified_window_store(
                     starts = starts[keep]
                     ends = ends[keep]
                     temporal = temporal[keep]
-                if not len(raw):
-                    skipped_short += 1
-                    continue
                 if recording.supervision_kind == "temporal" and recording.is_fall:
                     missing_positive = int(not np.any(temporal == 1))
                     events_without_positive_window += missing_positive
@@ -288,8 +285,11 @@ def prepare_unified_window_store(
                         dataset_events_without_positive.get(recording.dataset_id, 0)
                         + missing_positive
                     )
-                with phases.track("feature_extraction_seconds"):
-                    features = extract_window_features(raw, sampling_rate_hz)
+                if len(raw):
+                    with phases.track("feature_extraction_seconds"):
+                        features = extract_window_features(raw, sampling_rate_hz)
+                else:
+                    features = np.empty((0, len(FEATURE_NAMES)), dtype=np.float32)
                 onset = recording.fall_event.onset_sample if recording.fall_event else -1
                 impact = recording.fall_event.impact_sample if recording.fall_event else -1
                 with phases.track("sequence_metadata_write_seconds"):

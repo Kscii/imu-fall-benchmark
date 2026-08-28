@@ -53,13 +53,20 @@ def temporal_event_metrics(
     indices: np.ndarray,
     scores: np.ndarray,
     threshold: float,
+    *,
+    sequence_scope: np.ndarray | None = None,
 ) -> dict[str, int | float]:
     selected = np.asarray(indices, dtype=np.int64)
     values = np.asarray(scores, dtype=np.float64)
     if len(selected) != len(values):
         raise ValueError("Temporal event scores do not match selected windows")
     by_global = dict(zip(selected.tolist(), values.tolist(), strict=True))
-    sequence_ids = np.unique(store.sequence_index[selected])
+    if sequence_scope is None:
+        sequence_ids = np.unique(store.sequence_index[selected])
+    else:
+        sequence_ids = np.unique(np.asarray(sequence_scope, dtype=np.int64))
+        if np.any((sequence_ids < 0) | (sequence_ids >= len(store.dataset_id))):
+            raise ValueError("Temporal event sequence scope contains an invalid sequence ID")
     fall_events = detected_events = no_positive_window = 0
     adl_recordings = adl_false_recordings = 0
     adl_scores: list[np.ndarray] = []

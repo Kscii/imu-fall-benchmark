@@ -43,7 +43,7 @@ from .window_cache import (
     prepare_unified_window_store,
 )
 
-ENGINE_SCHEMA_VERSION = 1
+ENGINE_SCHEMA_VERSION = 2
 TABULAR_MODELS = (
     "cuml_logistic_regression",
     "cuml_random_forest",
@@ -556,6 +556,15 @@ def _evaluate(
     if job.objective == "temporal_supervised":
         validation_labels = store.temporal_label[split.validation]
         test_labels = store.temporal_label[split.test]
+        if config["max_sequences_per_split"] is None:
+            # A full run also evaluates fall events that retained no decision window.
+            test_sequence_scope = np.flatnonzero(
+                np.isin(store.dataset_id, config["data_view"]["training_datasets"])
+                & (store.sequence_fold_id == split.test_fold)
+            )
+        else:
+            # A capped smoke run evaluates only the sampled sequence subset.
+            test_sequence_scope = _sequence_ids(store, split.test)
         threshold, validation_bacc, validation_mcc = best_threshold(
             validation_labels, validation_scores
         )
@@ -565,7 +574,13 @@ def _evaluate(
             "validation_balanced_accuracy": validation_bacc,
             "validation_mcc": validation_mcc,
             "test_metrics": binary_classification_metrics(test_labels, test_scores, threshold),
-            "event_metrics": temporal_event_metrics(store, split.test, test_scores, threshold),
+            "event_metrics": temporal_event_metrics(
+                store,
+                split.test,
+                test_scores,
+                threshold,
+                sequence_scope=test_sequence_scope,
+            ),
             "subgroup_metrics": subgroup_metrics(store, split.test, test_scores, threshold),
             "external_metrics": None,
             "external_event_metrics": None,
@@ -586,6 +601,9 @@ def _evaluate(
         external_scores, store.sequence_index[split.external], top_fraction
     )
     external_labels = store.sequence_is_fall[external_ids].astype(np.int8)
+    external_sequence_scope = np.flatnonzero(
+        store.dataset_id == config["data_view"]["evaluation_dataset"]
+    )
     return {
         "selected_threshold": threshold,
         "threshold_selection": "maximum_validation_recording_balanced_accuracy",
@@ -603,7 +621,11 @@ def _evaluate(
             ),
         },
         "external_event_metrics": temporal_event_metrics(
-            store, split.external, external_scores, threshold
+            store,
+            split.external,
+            external_scores,
+            threshold,
+            sequence_scope=external_sequence_scope,
         ),
     }
 
