@@ -1,8 +1,8 @@
 schema_version: 1
-id: kfall_public_adl_smoke_v1
+id: kfall_public_adl_smoke_v2
 contract_path: configs/contracts/imu_benchmark_contract_v1.json
-snapshot_path: data/snapshot_v1.json
-data_view_path: configs/data_views/kfall_public_adl_v1.yaml
+snapshot_path: data/snapshot_v2.json
+data_view_path: configs/data_views/kfall_public_adl_v2.yaml
 model_catalog_path: configs/models/fall_models_v1.yaml
 models:
   - threshold_impact
@@ -23,6 +23,6 @@ max_windows_per_sequence: 48
 cache_flush_windows: 16384
 data_quality_status: provisional_research_view
 known_limitations:
-  - Public recording-labelled fall recordings are excluded; only public ADL windows supplement training.
+  - This view uses only non-fall windows from supplement datasets; their fall recordings or intervals are excluded.
   - KFall validation and test remain participant-disjoint and receive no public-data windows.
   - KFall adapter timing limitations still apply.

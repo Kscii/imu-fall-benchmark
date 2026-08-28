@@ -1,7 +1,7 @@
 schema_version: 1
-id: kfall_reproduce_v1
+id: kfall_fold0_pilot_fp32_v2
 contract_path: configs/contracts/imu_benchmark_contract_v1.json
-snapshot_path: data/snapshot_v1.json
+snapshot_path: data/snapshot_v2.json
 data_view_path: configs/data_views/kfall_temporal_v1.yaml
 model_catalog_path: configs/models/fall_models_v1.yaml
 models:
@@ -12,17 +12,18 @@ models:
   - torch_1d_cnn
   - torch_lstm
   - torch_cnn_lstm
-folds: [0, 1, 2, 3, 4]
+folds: [0]
 seeds: [3888]
 precision: fp32
 gpu_mode: auto
 max_epochs: 50
 patience: 8
 max_sequences_per_split: null
-max_windows_per_sequence: 256
+max_windows_per_sequence: null
 cache_flush_windows: 16384
-data_quality_status: provisional_kfall_adapter_v1
-known_limitations:
+data_quality_status: provisional_engineering_pilot
+known_limitations: &pilot_limitations
+  - This single-fold engineering pilot is not formal model-validation evidence.
   - KFall onset and impact points may be shifted by one 30 Hz sample in the current adapter output.
   - KFall uses the adapter-provided fall activity segment ending at impact plus one second.
   - Window false positives per hour are not product alarm episodes per hour.

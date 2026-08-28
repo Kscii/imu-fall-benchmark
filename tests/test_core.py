@@ -35,17 +35,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 def test_distributed_data_and_split_validate() -> None:
     result = validate_data(PROJECT_ROOT)
     assert result["status"] == "PASS"
-    assert result["training"]["files"] == 5
-    assert result["training"]["sequences"] == 12_318
-    assert result["training"]["rows"] == 6_840_218
-    assert result["training"]["split"]["participants"] == 106
+    assert result["training"]["files"] == 8
+    assert result["training"]["sequences"] == 16_397
+    assert result["training"]["rows"] == 8_971_187
+    assert result["training"]["events"] == 573
+    assert result["training"]["split"]["participants"] == 160
     assert result["external"]["files"] == 1
     assert result["external"]["events"] == 2_346
     assert result["external"]["split"]["participants"] == 32
 
 
 def test_kfall_smoke_plan_contains_seven_public_fall_models() -> None:
-    config = load_experiment(PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/kfall_smoke_v1.yaml")
+    config = load_experiment(PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/kfall_smoke_v2.yaml")
     result = plan_experiment(config)
     assert result["scheduled_jobs"] == 7
     assert tuple(result["models"]) == PUBLIC_MODEL_IDS
@@ -57,17 +58,20 @@ def test_kfall_smoke_plan_contains_seven_public_fall_models() -> None:
 def test_research_data_views_are_explicit() -> None:
     mixed = load_experiment(
         PROJECT_ROOT,
-        PROJECT_ROOT / "configs/experiments/kfall_public_adl_smoke_v1.yaml",
+        PROJECT_ROOT / "configs/experiments/kfall_public_adl_smoke_v2.yaml",
     )
     mil = load_experiment(
-        PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/public_mil_smoke_v1.yaml"
+        PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/public_mil_smoke_v2.yaml"
     )
     assert mixed["data_view"]["research_only"]
     assert mixed["data_view"]["negative_supplement_datasets"] == [
         "cgu_bes",
+        "ipqm_fall",
+        "sfu_ipml",
         "sisfall",
         "uci_455",
         "umafall",
+        "univrfall",
         "upfall",
     ]
     assert mil["data_view"]["objective"] == "recording_mil"
@@ -77,6 +81,21 @@ def test_research_data_views_are_explicit() -> None:
         "torch_lstm",
         "torch_cnn_lstm",
     }
+    assert mil["data_view"]["training_datasets"] == [
+        "cgu_bes",
+        "ipqm_fall",
+        "sfu_ipml",
+        "sisfall",
+        "uci_455",
+        "umafall",
+        "upfall",
+    ]
+    univrfall = load_experiment(
+        PROJECT_ROOT,
+        PROJECT_ROOT / "configs/experiments/univrfall_temporal_smoke_v2.yaml",
+    )
+    assert univrfall["data_view"]["training_datasets"] == ["univrfall"]
+    assert len(build_jobs(univrfall)) == 7
 
 
 def test_engineered_window_features_are_finite() -> None:
@@ -115,7 +134,7 @@ def test_segment_decision_time_boundaries() -> None:
 
 def test_bf16_config_is_an_apples_to_apples_sequence_comparison() -> None:
     config = load_experiment(
-        PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/kfall_bf16_smoke_v1.yaml"
+        PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/kfall_bf16_smoke_v2.yaml"
     )
     assert config["precision"] == "bf16"
     assert config["folds"] == [0]
@@ -125,10 +144,10 @@ def test_bf16_config_is_an_apples_to_apples_sequence_comparison() -> None:
 
 def test_full_fold_pilot_configs_are_apples_to_apples() -> None:
     fp32 = load_experiment(
-        PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/kfall_fold0_pilot_fp32_v1.yaml"
+        PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/kfall_fold0_pilot_fp32_v2.yaml"
     )
     bf16 = load_experiment(
-        PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/kfall_fold0_pilot_bf16_v1.yaml"
+        PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/kfall_fold0_pilot_bf16_v2.yaml"
     )
     assert len(build_jobs(fp32)) == 7
     assert len(build_jobs(bf16)) == 3

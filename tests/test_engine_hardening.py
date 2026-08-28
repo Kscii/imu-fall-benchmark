@@ -24,7 +24,7 @@ def test_versioned_experiments_have_no_total_runtime_budget() -> None:
 def test_logistic_regression_convergence_state_is_machine_readable() -> None:
     params = dict(MODEL_SPECS["cuml_logistic_regression"].fixed_params)
     config = load_experiment(
-        PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/kfall_smoke_v1.yaml"
+        PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/kfall_smoke_v2.yaml"
     )
     assert config["model_catalog"]["models"]["cuml_logistic_regression"]["params"] == params
     adapter = CuMLAdapter("cuml_logistic_regression", params, random_seed=3888)
@@ -42,7 +42,7 @@ def test_logistic_regression_convergence_state_is_machine_readable() -> None:
 
 def test_checkpoint_schema_version_changes_job_hash(monkeypatch: pytest.MonkeyPatch) -> None:
     config = load_experiment(
-        PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/kfall_smoke_v1.yaml"
+        PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/kfall_smoke_v2.yaml"
     )
     plan = plan_experiment(config)
     assert plan["job_checkpoint_schema_version"] == engine.JOB_CHECKPOINT_SCHEMA_VERSION

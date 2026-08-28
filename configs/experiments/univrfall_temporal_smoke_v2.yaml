@@ -1,0 +1,28 @@
+schema_version: 1
+id: univrfall_temporal_smoke_v2
+contract_path: configs/contracts/imu_benchmark_contract_v1.json
+snapshot_path: data/snapshot_v2.json
+data_view_path: configs/data_views/univrfall_temporal_v1.yaml
+model_catalog_path: configs/models/fall_models_v1.yaml
+models:
+  - threshold_impact
+  - cuml_logistic_regression
+  - cuml_random_forest
+  - xgboost_cuda
+  - torch_1d_cnn
+  - torch_lstm
+  - torch_cnn_lstm
+folds: [0]
+seeds: [3888]
+precision: fp32
+gpu_mode: auto
+max_epochs: 2
+patience: 1
+max_sequences_per_split: 600
+max_windows_per_sequence: 48
+cache_flush_windows: 16384
+data_quality_status: ready_public_temporal_smoke
+known_limitations:
+  - This smoke validates participant-disjoint UNIVRFall temporal execution, not model quality.
+  - It does not report cross-dataset transfer to KFall.
+  - Sensor-local axes are not rotated into a common body coordinate frame.

@@ -1,7 +1,7 @@
 schema_version: 1
-id: kfall_bf16_smoke_v1
+id: kfall_bf16_smoke_v2
 contract_path: configs/contracts/imu_benchmark_contract_v1.json
-snapshot_path: data/snapshot_v1.json
+snapshot_path: data/snapshot_v2.json
 data_view_path: configs/data_views/kfall_temporal_v1.yaml
 model_catalog_path: configs/models/fall_models_v1.yaml
 models:

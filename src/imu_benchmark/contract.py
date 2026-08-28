@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Any
 
 CONTRACT_VERSION = "imu_benchmark_contract_v1"
-SNAPSHOT_VERSION = "imu_30hz_snapshot_v1"
+SNAPSHOT_VERSION = "imu_30hz_snapshot_v2"
 DEFAULT_CONTRACT_PATH = Path("configs/contracts/imu_benchmark_contract_v1.json")
-DEFAULT_SNAPSHOT_PATH = Path("data/snapshot_v1.json")
+DEFAULT_SNAPSHOT_PATH = Path("data/snapshot_v2.json")
 
 
 def canonical_json_sha256(payload: object) -> str:
@@ -113,7 +113,7 @@ def load_contract_bundle(config_path: Path) -> ContractBundle:
     if Path(contract_relative) != DEFAULT_CONTRACT_PATH:
         raise ValueError("Experiment config must reference the contract-v1 canonical path")
     if Path(snapshot_relative) != DEFAULT_SNAPSHOT_PATH:
-        raise ValueError("Experiment config must reference the snapshot-v1 canonical path")
+        raise ValueError("Experiment config must reference the snapshot-v2 canonical path")
     contract = _read_object(project_root / contract_relative)
     snapshot = _read_object(project_root / snapshot_relative)
     validate_contract(contract)

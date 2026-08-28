@@ -1,14 +1,14 @@
 # IMU Fall Benchmark
 
 This repository is a self-contained WSL2/CUDA benchmark for six-axis IMU fall detection. It
-versions the six HDF5 v3 datasets, participant folds, experiment definitions, training code, and
+versions nine HDF5 v3 datasets, participant folds, experiment definitions, training code, and
 tests needed by another team member to clone the repository and reproduce a run.
 
-The current primary task is temporally supervised fall-window detection on KFall. Five public
-recording-labelled datasets remain available for explicitly marked research views: they may add
-ADL negatives to KFall training, or support a recording-level Multiple Instance Learning (MIL)
-experiment. Position classification and the old position-model matrix are outside the current
-public scope.
+The current primary task is temporally supervised fall-window detection on KFall. UNIVRFall is a
+second, research-only temporal source. Seven recording-labelled datasets remain available for
+explicitly marked research views: they may add non-fall windows to KFall training, or support a
+recording-level Multiple Instance Learning (MIL) experiment. Position classification and the old
+position-model matrix are outside the current public scope.
 
 This is a research benchmark, not the Android alert product. It outputs a `fall_score`; the score
 must not be described as a calibrated probability unless a later calibration contract proves it.
@@ -61,24 +61,24 @@ The first smoke builds a unified derived cache. It reads every source HDF5 once 
 writes are flushed in batches of 16,384 windows. Later runs reuse the content-addressed cache and
 materialise each required input array once per invocation.
 
-On the reference RTX 4070 SUPER machine, the fresh unified cache took 97.2 seconds to build for
-468,728 windows. The first seven-model smoke invocation, including that build, took 115.7 seconds;
-a fully resumed engine invocation took 2.34 seconds. These timings are engineering acceptance
-evidence, not model-quality evidence. The previous B3 implementation spent about 144 seconds on
-its public-data cache and 41 seconds on its separate KFall cache.
+For the retired snapshot v1 on the reference RTX 4070 SUPER machine, the fresh unified cache took
+97.2 seconds to build for 468,728 windows. The first seven-model smoke invocation, including that
+build, took 115.7 seconds; a fully resumed engine invocation took 2.34 seconds. These historical
+timings are engineering acceptance evidence, not model-quality evidence. Snapshot v2 changes the
+source data and deliberately receives a new cache fingerprint.
 
 ## Versioned experiments
 
 Experiments are YAML files under `configs/experiments/`. Inspect a plan without starting CUDA work:
 
 ```bash
-./benchmark plan configs/experiments/kfall_reproduce_v1.yaml
+./benchmark plan configs/experiments/kfall_reproduce_v2.yaml
 ```
 
 Run and resume the complete five-fold KFall experiment:
 
 ```bash
-./benchmark run configs/experiments/kfall_reproduce_v1.yaml --resume
+./benchmark run configs/experiments/kfall_reproduce_v2.yaml --resume
 ```
 
 Regenerate a report without retraining:
@@ -90,8 +90,8 @@ Regenerate a report without retraining:
 Before a formal five-fold experiment, use the two full-data fold-0 engineering pilots:
 
 ```bash
-./benchmark run configs/experiments/kfall_fold0_pilot_fp32_v1.yaml --resume
-./benchmark run configs/experiments/kfall_fold0_pilot_bf16_v1.yaml --resume
+./benchmark run configs/experiments/kfall_fold0_pilot_fp32_v2.yaml --resume
+./benchmark run configs/experiments/kfall_fold0_pilot_bf16_v2.yaml --resume
 ```
 
 Run FP32 first. The BF16 pilot contains only the three PyTorch sequence models and is comparable
@@ -100,7 +100,7 @@ KFall split, 50 maximum epochs, and patience 8. These pilots check full-scale ex
 checkpointing, performance, and numerical sanity. A single provisional fold is not formal
 model-validation evidence.
 
-On the reference machine with the unified cache already present, the first FP32 pilot invocation
+For snapshot v1 on the reference machine with the unified cache already present, the first FP32 pilot invocation
 took 39.6 seconds and the BF16 pilot took 59.4 seconds. BF16 was not a general speed-up: compared
 with FP32, model fit was about 4% slower for 1D CNN, 50% faster for LSTM, and 8 times slower for
 CNN-LSTM. Because early-stopping trajectories also differed, these are end-to-end engineering
@@ -118,8 +118,9 @@ The main data views are:
 | Data view | Training | Validation/test | Status |
 |---|---|---|---|
 | `kfall_temporal_v1` | temporally labelled KFall windows | participant-disjoint KFall | primary |
-| `kfall_public_adl_v1` | KFall plus public ADL negatives | KFall only | research only |
-| `public_recording_mil_v1` | five recording-labelled datasets | public folds plus frozen KFall transfer | research only |
+| `univrfall_temporal_v1` | temporally labelled UNIVRFall windows | participant-disjoint UNIVRFall | research-only smoke |
+| `kfall_public_adl_v2` | KFall plus non-fall windows from the other datasets | KFall only | research only |
+| `public_recording_mil_v2` | seven recording-labelled datasets | public folds plus frozen KFall transfer | research only |
 
 For fold `k`, fold `k` is test, fold `(k + 1) mod 5` is validation, and the remaining three folds
 train the model. Threshold selection uses validation Balanced Accuracy only. Updating the dataset
@@ -173,8 +174,12 @@ testable.
 
 The machine-readable protocol is
 [`configs/contracts/imu_benchmark_contract_v1.json`](configs/contracts/imu_benchmark_contract_v1.json).
-The immutable six-file snapshot is [`data/snapshot_v1.json`](data/snapshot_v1.json). Experiment
+The immutable nine-file snapshot is [`data/snapshot_v2.json`](data/snapshot_v2.json). Experiment
 YAML cannot override contract-owned sampling, window, label, or metric rules.
+
+Only the latest snapshot is supported by the current source tree. Snapshot v1 configuration and
+split files have been retired; reproducing a historical v1 run requires checking out the commit
+that contains the v1 code and manifests. Existing external run directories remain immutable.
 
 KFall currently remains `provisional_kfall_adapter_v1`: onset and impact may be shifted by one
 30 Hz sample, ADL codes are placeholders, and the fall activity tail ends one second after impact.

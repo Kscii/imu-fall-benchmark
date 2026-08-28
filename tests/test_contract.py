@@ -29,7 +29,7 @@ def _annotations() -> tuple[Annotation, ...]:
 def test_contract_and_snapshot_are_single_protocol_source() -> None:
     contract, snapshot, contract_hash, snapshot_hash = load_contract_snapshot(PROJECT_ROOT)
     assert contract["contract_version"] == "imu_benchmark_contract_v1"
-    assert snapshot["snapshot_version"] == "imu_30hz_snapshot_v1"
+    assert snapshot["snapshot_version"] == "imu_30hz_snapshot_v2"
     assert contract["canonical_signal"]["sampling_rate_hz"] == 30
     assert contract["window"]["samples"] == 60
     assert contract["window"]["stride_samples"] == 15
@@ -45,7 +45,7 @@ def test_experiment_cannot_override_protocol_fields(tmp_path: Path) -> None:
         json.dumps(
             {
                 "contract_path": "configs/contracts/imu_benchmark_contract_v1.json",
-                "snapshot_path": "data/snapshot_v1.json",
+                "snapshot_path": "data/snapshot_v2.json",
                 "sampling_rate_hz": 25,
             }
         ),
@@ -63,7 +63,7 @@ def test_experiment_cannot_override_contract_digest(tmp_path: Path) -> None:
         json.dumps(
             {
                 "contract_path": "configs/contracts/imu_benchmark_contract_v1.json",
-                "snapshot_path": "data/snapshot_v1.json",
+                "snapshot_path": "data/snapshot_v2.json",
                 "contract_sha256": "0" * 64,
             }
         ),
@@ -71,6 +71,23 @@ def test_experiment_cannot_override_contract_digest(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="must come from the contract"):
         load_contract_bundle(bad)
+
+
+def test_snapshot_v1_is_no_longer_supported(tmp_path: Path) -> None:
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    old = configs / "old.json"
+    old.write_text(
+        json.dumps(
+            {
+                "contract_path": "configs/contracts/imu_benchmark_contract_v1.json",
+                "snapshot_path": "data/snapshot_v1.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="snapshot-v2"):
+        load_contract_bundle(old)
 
 
 def test_reference_25_to_30_hz_resampling() -> None:
@@ -164,7 +181,7 @@ def test_current_fold_plan_is_a_read_only_noop() -> None:
     training = plan_fold_assignments(PROJECT_ROOT, "training")
     external = plan_fold_assignments(PROJECT_ROOT, "external")
     assert training["new_participants"] == 0
-    assert training["candidate_version"] == "participant_5fold_v2"
+    assert training["candidate_version"] == "participant_5fold_v3"
     assert external["new_participants"] == 0
     assert external["candidate_version"] == "kfall_external_5fold_v1"
 

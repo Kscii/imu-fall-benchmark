@@ -13,7 +13,16 @@ import numpy as np
 
 from .contract import DEFAULT_CONTRACT_PATH, DEFAULT_SNAPSHOT_PATH, load_contract_snapshot
 
-TRAINING_DATASET_IDS = ("cgu_bes", "sisfall", "uci_455", "umafall", "upfall")
+TRAINING_DATASET_IDS = (
+    "cgu_bes",
+    "ipqm_fall",
+    "sfu_ipml",
+    "sisfall",
+    "uci_455",
+    "umafall",
+    "univrfall",
+    "upfall",
+)
 EXTERNAL_DATASET_IDS = ("kfall",)
 EXPECTED_SCHEMA_VERSION = "3.0.0"
 FEATURE_COLUMNS = (

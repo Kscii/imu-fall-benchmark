@@ -1,13 +1,16 @@
 schema_version: 1
-id: kfall_public_adl_v1
+id: kfall_public_adl_v2
 objective: temporal_supervised
 research_only: true
 training_datasets:
   - kfall
 negative_supplement_datasets:
   - cgu_bes
+  - ipqm_fall
+  - sfu_ipml
   - sisfall
   - uci_455
   - umafall
+  - univrfall
   - upfall
 evaluation_dataset: kfall

@@ -190,7 +190,7 @@ def load_experiment(project_root: Path, path: Path) -> dict[str, Any]:
     if Path(str(experiment["contract_path"])) != DEFAULT_CONTRACT_PATH:
         raise ValueError("Experiment must use the canonical contract-v1 path")
     if Path(str(experiment["snapshot_path"])) != DEFAULT_SNAPSHOT_PATH:
-        raise ValueError("Experiment must use snapshot-v1")
+        raise ValueError("Experiment must use snapshot-v2")
     contract, snapshot, contract_hash, snapshot_hash = load_contract_snapshot(project_root)
     model_path = _project_path(
         project_root, experiment["model_catalog_path"], parent="model_catalog_path"

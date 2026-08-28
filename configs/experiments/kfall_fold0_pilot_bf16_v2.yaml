@@ -1,7 +1,7 @@
 schema_version: 1
-id: kfall_fold0_pilot_bf16_v1
+id: kfall_fold0_pilot_bf16_v2
 contract_path: configs/contracts/imu_benchmark_contract_v1.json
-snapshot_path: data/snapshot_v1.json
+snapshot_path: data/snapshot_v2.json
 data_view_path: configs/data_views/kfall_temporal_v1.yaml
 model_catalog_path: configs/models/fall_models_v1.yaml
 models:
@@ -21,5 +21,5 @@ data_quality_status: provisional_engineering_pilot
 known_limitations:
   - This single-fold engineering pilot is not formal model-validation evidence.
   - BF16 is applied only to PyTorch forward and loss computation; source values and normalisation remain FP32.
-  - Compare this run only with kfall_fold0_pilot_fp32_v1 on the same snapshot and source commit.
+  - Compare this run only with kfall_fold0_pilot_fp32_v2 on the same snapshot and source commit.
   - KFall adapter timing limitations still apply.

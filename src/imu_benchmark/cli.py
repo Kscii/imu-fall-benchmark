@@ -19,7 +19,7 @@ from .runtime import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SMOKE_CONFIG = PROJECT_ROOT / "configs/experiments/kfall_smoke_v1.yaml"
+DEFAULT_SMOKE_CONFIG = PROJECT_ROOT / "configs/experiments/kfall_smoke_v2.yaml"
 
 
 def _config(path: Path) -> dict:

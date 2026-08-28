@@ -1,0 +1,14 @@
+schema_version: 1
+id: public_recording_mil_v2
+objective: recording_mil
+research_only: true
+training_datasets:
+  - cgu_bes
+  - ipqm_fall
+  - sfu_ipml
+  - sisfall
+  - uci_455
+  - umafall
+  - upfall
+negative_supplement_datasets: []
+evaluation_dataset: kfall
