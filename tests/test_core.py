@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from imu_benchmark import runtime
+from imu_benchmark import cloud_data, runtime
 from imu_benchmark.cloud_data import _validate_remote_manifest, data_bucket
 from imu_benchmark.configuration import PUBLIC_MODEL_IDS, load_experiment
 from imu_benchmark.dataset import validate_data
@@ -147,6 +148,23 @@ def test_versioned_base_manifest_is_cloud_safe(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("IMU_BENCH_DATA_BUCKET", "gs://team-bucket/prefix")
     with pytest.raises(ValueError, match="bucket URI"):
         data_bucket()
+
+
+def test_headless_data_pull_requires_prior_gcloud_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cloud_data,
+        "_run_gcloud",
+        lambda *arguments, **options: SimpleNamespace(stdout=""),
+    )
+    monkeypatch.setattr(
+        cloud_data.sys,
+        "stdin",
+        SimpleNamespace(isatty=lambda: False),
+    )
+    with pytest.raises(RuntimeError, match="interactive WSL terminal"):
+        cloud_data.ensure_gcloud_login(interactive=True)
 
 
 def test_reviewed_base_hdf5_integration(active_manifest_path: Path) -> None:
