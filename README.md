@@ -178,6 +178,9 @@ run_manifest.json
 report.md
 ```
 
+`subgroup_metrics.csv` and `external_metrics.csv` are emitted only when the selected data view
+produces those result scopes.
+
 Set `IMU_BENCH_WORK_ROOT` to an absolute path to move both cache and run output. Keeping generated
 state outside the clone allows source snapshots to be replaced without losing resumable jobs.
 
