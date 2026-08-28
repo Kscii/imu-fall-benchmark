@@ -13,7 +13,7 @@ from imu_benchmark.data import (
 )
 from imu_benchmark.dataset import Annotation, validate_data
 from imu_benchmark.device import CudaUnavailable, _parse_nvidia_smi_line
-from imu_benchmark.engine import plan_experiment
+from imu_benchmark.engine import build_jobs, plan_experiment
 from imu_benchmark.evaluation import best_threshold
 from imu_benchmark.performance import (
     PERFORMANCE_SCHEMA_VERSION,
@@ -121,6 +121,35 @@ def test_bf16_config_is_an_apples_to_apples_sequence_comparison() -> None:
     assert config["folds"] == [0]
     assert config["seeds"] == [3888]
     assert config["models"] == ["torch_1d_cnn", "torch_lstm", "torch_cnn_lstm"]
+
+
+def test_full_fold_pilot_configs_are_apples_to_apples() -> None:
+    fp32 = load_experiment(
+        PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/kfall_fold0_pilot_fp32_v1.yaml"
+    )
+    bf16 = load_experiment(
+        PROJECT_ROOT, PROJECT_ROOT / "configs/experiments/kfall_fold0_pilot_bf16_v1.yaml"
+    )
+    assert len(build_jobs(fp32)) == 7
+    assert len(build_jobs(bf16)) == 3
+    for field in (
+        "contract_sha256",
+        "snapshot_sha256",
+        "data_view_sha256",
+        "folds",
+        "seeds",
+        "gpu_mode",
+        "max_epochs",
+        "patience",
+        "max_sequences_per_split",
+        "max_windows_per_sequence",
+    ):
+        assert fp32[field] == bf16[field]
+    assert fp32["precision"] == "fp32"
+    assert bf16["precision"] == "bf16"
+    assert bf16["models"] == ["torch_1d_cnn", "torch_lstm", "torch_cnn_lstm"]
+    assert fp32["max_sequences_per_split"] is None
+    assert fp32["max_windows_per_sequence"] is None
 
 
 def test_work_paths_use_visible_default_and_absolute_override(
