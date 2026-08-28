@@ -768,7 +768,7 @@ def _result_rows(results: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], .
             "model_id": job["model_id"],
             "fold": job["fold"],
             "seed": job["seed"],
-            "precision": job["precision"],
+            "compute_precision": job["precision"],
             "threshold": metadata["selected_threshold"],
         }
         metric_rows.append({**base, **metadata["test_metrics"]})

@@ -182,6 +182,9 @@ and confusion counts. Temporal runs also record event sensitivity, ADL false-pos
 windows per hour, and onset/impact-relative latency. Dataset and body-location subgroup CSVs are
 generated when those groups exist in the selected test view.
 
+In result CSV files, `compute_precision` is the execution mode (`fp32` or `bf16`), while
+`precision` is the positive predictive value classification metric.
+
 Stable run IDs are derived from the resolved configuration and data-cache fingerprint. Outputs are
 written below `~/imu-fall-work/runs/<run-id>/` by default:
 

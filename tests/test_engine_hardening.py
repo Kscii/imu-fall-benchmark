@@ -7,7 +7,7 @@ import yaml
 
 from imu_benchmark import engine
 from imu_benchmark.configuration import load_experiment
-from imu_benchmark.engine import _job_hash, build_jobs, plan_experiment
+from imu_benchmark.engine import _job_hash, _result_rows, build_jobs, plan_experiment
 from imu_benchmark.models import CuMLAdapter, ModelConvergenceError
 from imu_benchmark.specs import MODEL_SPECS
 
@@ -54,3 +54,34 @@ def test_checkpoint_schema_version_changes_job_hash(monkeypatch: pytest.MonkeyPa
         engine.JOB_CHECKPOINT_SCHEMA_VERSION + 1,
     )
     assert _job_hash(config, "cache-fingerprint", job) != original
+
+
+def test_result_rows_distinguish_compute_and_classification_precision() -> None:
+    results = [
+        {
+            "metadata": {
+                "job": {
+                    "data_view_id": "kfall_temporal_v1",
+                    "objective": "temporal_supervised",
+                    "model_id": "torch_1d_cnn",
+                    "fold": 0,
+                    "seed": 3888,
+                    "precision": "bf16",
+                },
+                "selected_threshold": 0.4,
+                "test_metrics": {"precision": 0.75, "balanced_accuracy": 0.8},
+                "event_metrics": {"event_sensitivity": 0.9},
+                "subgroup_metrics": [],
+                "external_metrics": None,
+            }
+        }
+    ]
+
+    metric_rows, event_rows, subgroup_rows, external_rows = _result_rows(results)
+
+    assert metric_rows[0]["compute_precision"] == "bf16"
+    assert metric_rows[0]["precision"] == 0.75
+    assert event_rows[0]["compute_precision"] == "bf16"
+    assert "precision" not in event_rows[0]
+    assert subgroup_rows == []
+    assert external_rows == []
