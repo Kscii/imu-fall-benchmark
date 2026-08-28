@@ -87,9 +87,22 @@ Regenerate a report without retraining:
 ./benchmark report <run-id>
 ```
 
+Before a formal five-fold experiment, use the two full-data fold-0 engineering pilots:
+
+```bash
+./benchmark run configs/experiments/kfall_fold0_pilot_fp32_v1.yaml --resume
+./benchmark run configs/experiments/kfall_fold0_pilot_bf16_v1.yaml --resume
+```
+
+Run FP32 first. The BF16 pilot contains only the three PyTorch sequence models and is comparable
+only with those same models in the FP32 pilot: both configurations fix fold 0, seed 3888, the full
+KFall split, 50 maximum epochs, and patience 8. These pilots check full-scale execution,
+checkpointing, performance, and numerical sanity. A single provisional fold is not formal
+model-validation evidence.
+
 The configuration is split deliberately into three small layers:
 
-- `configs/experiments/`: folds, seeds, precision, GPU mode, runtime limits, and selected models;
+- `configs/experiments/`: folds, seeds, precision, GPU mode, training limits, and selected models;
 - `configs/data_views/`: which datasets may train, supplement, and evaluate a model;
 - `configs/models/`: the seven public model definitions and fixed hyperparameters.
 
@@ -105,6 +118,11 @@ For fold `k`, fold `k` is test, fold `(k + 1) mod 5` is validation, and the rema
 train the model. Threshold selection uses validation Balanced Accuracy only. Updating the dataset
 snapshot therefore requires rerunning every affected experiment; old run directories remain tied
 to their original config and cache fingerprints.
+
+Experiments have no total wall-clock budget. Every iterative model has an explicit iteration or
+epoch limit, and PyTorch models also use validation early stopping. Interrupting a run with
+`Ctrl+C` is safe: each completed job is written atomically, and `--resume` reuses only compatible
+checkpoints. An interrupted in-progress job starts again from the beginning.
 
 ## Models and precision
 
@@ -122,6 +140,11 @@ Tabular models use the 158 engineered features. Sequence models read the 60×6 r
 the default. BF16 is available only for PyTorch forward and loss computation; source arrays,
 normalisation statistics, thresholds, and reported scores remain FP32 or float64 as appropriate.
 Compare BF16 only against a run with the same data view, fold, seed, sampling, and model settings.
+
+Logistic Regression has a fixed 500-iteration limit. Its public cuML `n_iter_` value is stored as
+machine-readable `optimization` metadata in the job checkpoint. Reaching the limit is treated as
+a failed job instead of silently accepting a potentially unconverged model or retrying with a
+different configuration.
 
 `gpu_mode` can be `auto`, `resident`, or `streaming`. Auto mode reserves the larger of 4 GiB or
 40% of total VRAM, then keeps prepared tensors resident only if the estimate fits. Streaming uses
@@ -177,6 +200,11 @@ performance.json
 run_manifest.json
 report.md
 ```
+
+Job checkpoints have their own compatibility schema, separate from report and execution-engine
+schemas. A schema or model/config change invalidates incompatible jobs while leaving older run
+directories intact. Each trainable job records `optimization` metadata when the backend exposes a
+reliable convergence signal; unsupported models store no inferred convergence claim.
 
 `subgroup_metrics.csv` and `external_metrics.csv` are emitted only when the selected data view
 produces those result scopes.
