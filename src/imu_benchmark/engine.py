@@ -43,7 +43,7 @@ from .window_cache import (
     prepare_unified_window_store,
 )
 
-ENGINE_SCHEMA_VERSION = 2
+ENGINE_SCHEMA_VERSION = 3
 TABULAR_MODELS = (
     "cuml_logistic_regression",
     "cuml_random_forest",
