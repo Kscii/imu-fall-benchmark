@@ -138,7 +138,9 @@ benchmark-datasets/
 └── team/cw12eu/current.json
 ```
 
-snapshot 对象不可覆盖；`current.json` 只是一个小型显式指针。发布公共 base 是维护操作：
+`benchmark-datasets/` 已启用为 GCS managed folder，组员的只读 IAM 只应绑定到该资源，不能授予
+整个 bucket 的 Viewer。snapshot 对象不可覆盖；`current.json` 只是一个小型显式指针。发布公共
+base 是维护操作：
 
 ```bash
 ./benchmark data publish-base --source-dir /path/to/reviewed/imu_25hz
