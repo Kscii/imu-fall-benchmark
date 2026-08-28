@@ -1,12 +1,12 @@
-# 协作说明
+# Contributing
 
-## 当前范围
+## Current scope
 
-本仓库当前只维护 WSL2/CUDA 上的时序滑动窗口跌倒 benchmark。新增任务前，先在 Issue 中写清楚目的、数据范围、合同变化、预期产物和验收方法。位置分类、Android、标注 UI、云端服务和产品告警策略应分别在对应仓库或后续 workstream 中处理。
+This repository currently maintains only the WSL2/CUDA temporal sliding-window fall benchmark. Before adding a task, open an Issue describing its purpose, data scope, contract changes, expected deliverables, and acceptance method. Wear-location classification, Android development, the annotation UI, cloud services, and product alert policies belong in their respective repositories or later workstreams.
 
-## 提交前检查
+## Checks before committing
 
-在 WSL2 中执行：
+Run inside WSL2:
 
 ```bash
 ./benchmark test
@@ -14,7 +14,7 @@
 ./benchmark plan configs/experiments/temporal_smoke_v1.yaml
 ```
 
-只修改纯 Python/合同单元测试时，也可以在其他 Linux 开发机执行：
+For pure Python or contract unit-test changes, another Linux development host may run:
 
 ```bash
 uv sync --dev
@@ -22,26 +22,26 @@ uv run ruff check src tests
 uv run pytest -q
 ```
 
-正式训练、doctor 和 smoke 仍必须在 WSL2 + NVIDIA CUDA 上执行。
+Formal training, `doctor`, and `smoke` still require WSL2 with NVIDIA CUDA.
 
-## 数据与合同规则
+## Data and contract rules
 
-- 不提交 `*.h5`、cache、run、模型 checkpoint、云凭据或本地 `TODO.md`；
-- 数据通过 GCS 的不可变 snapshot + `current.json` 管理；
-- 不允许原地替换已经发布的 snapshot 对象；
-- base 数据使用 fold `0..4`，team 数据只能使用训练专用 fold `-1`；
-- 修改采样率、窗口、步长、标签、fold 或指标时，必须提升相应 schema/contract/config 版本并增加回归测试；
-- 不允许为了得到更好结果而静默改变 seed、split、阈值选择或数据过滤规则；
-- 结果必须保留 resolved config、来源、环境、日志和 machine-readable 指标。
+- Do not commit `*.h5`, caches, runs, model checkpoints, cloud credentials, or the local `TODO.md`.
+- Manage data through immutable GCS snapshots and explicit `current.json` pointers.
+- Never replace an already published snapshot object in place.
+- Base data uses folds `0..4`; team data must use the training-only fold `-1`.
+- Changes to sampling rate, windows, stride, labels, folds, or metrics must increment the relevant schema, contract, or configuration version and add regression tests.
+- Never change a seed, split, threshold-selection rule, or data filter silently to improve results.
+- Preserve the resolved configuration, source provenance, environment, logs, and machine-readable metrics for every result.
 
-## 代码规则
+## Code rules
 
-- 保持公开 CLI 简单，优先扩展现有 `setup / data / doctor / test / smoke / plan / run / report`；
-- 配置写入 `configs/`，不可把协议常量散落在命令行参数中；
-- 注释和代码标识使用英文，组员文档当前使用中文；
-- 自动生成内容写入 `IMU_BENCH_WORK_ROOT`，不写入仓库；
-- 提交应保持单一目的，避免把数据合同、模型逻辑和文档重写混在一个无法审查的 commit 中。
+- Keep the public CLI small. Prefer extending the existing `setup / data / doctor / test / smoke / plan / run / report` workflow.
+- Store configurations under `configs/`; do not scatter protocol constants across command-line flags.
+- Use English for code identifiers, comments, and tracked documentation.
+- Write generated content to `IMU_BENCH_WORK_ROOT`, not into the repository.
+- Keep commits single-purpose. Avoid mixing data-contract, model-logic, and documentation rewrites into one unreviewable commit.
 
-## 结果表述
+## Reporting results
 
-Smoke 只能证明流程可运行。单 fold pilot 是工程验证，不是最终模型结论。正式比较至少需要团队先确认数据范围、fold、seed、指标、阈值协议和需要保留的 artefact。`fall_score` 在完成单独校准前不能称为概率。
+A smoke run proves only that the workflow executes. A single-fold pilot is engineering validation, not a final model conclusion. Formal comparison requires the team to agree on data scope, folds, seeds, metrics, threshold protocol, and retained artefacts first. Do not call `fall_score` a probability before completing a separate calibration process.

@@ -1,32 +1,32 @@
 # IMU Fall Benchmark
 
-这是一个面向组员内部使用的六轴 IMU 跌倒检测 benchmark。仓库负责版本控制训练代码、数据合同、fold、实验配置、测试和结果格式；HDF5 数据不进入 Git，而是从项目的 Google Cloud Storage（GCS）bucket 下载。
+This repository provides a six-axis IMU fall-detection benchmark for internal team use. It versions the training code, data contract, folds, experiment configurations, tests, and result formats. HDF5 datasets are not stored in Git; they are downloaded from the project's Google Cloud Storage (GCS) bucket.
 
-当前版本只处理一个任务：使用带时间区间标注的数据训练和评估因果滑动窗口跌倒分类器。位置分类、recording-level MIL、Android 实时告警策略和自动部署不在本仓库当前范围内。
+The current release covers one task only: training and evaluating causal sliding-window fall classifiers using temporal interval labels. Wear-location classification, recording-level MIL, Android alert policies, and automated deployment are outside the current scope.
 
-模型输出的 `fall_score` 是分类分数，除非后续单独完成概率校准，否则不能把它描述为“跌倒概率”。
+The model output is named `fall_score`. It must not be described as a fall probability unless a separate probability-calibration process is completed later.
 
-## 运行环境
+## Runtime environment
 
-正式训练和评估只支持：
+Training and evaluation officially support only:
 
-- Windows 11 + WSL2；
-- NVIDIA CUDA GPU，参考机器为 RTX 4070 SUPER 12 GB；
-- 仓库位于 WSL 的 Linux 文件系统，例如 `~/projects/imu-fall-benchmark`，不能放在 `/mnt/c`；
-- Python 3.12、CUDA 12.9、RAPIDS 26.08、XGBoost 3.4.0 和 PyTorch 2.8.0。
+- Windows 11 with WSL2;
+- an NVIDIA CUDA GPU, with an RTX 4070 SUPER 12 GB used as the reference machine;
+- a repository checkout in the WSL Linux filesystem, such as `~/projects/imu-fall-benchmark`, not under `/mnt/c`;
+- Python 3.12, CUDA 12.9, RAPIDS 26.08, XGBoost 3.4.0, and PyTorch 2.8.0.
 
-Windows 只需要安装支持 WSL2 的 NVIDIA 驱动，不要在 WSL 内再次安装 Linux 显卡驱动。
+Install only the WSL2-compatible NVIDIA driver on Windows. Do not install a second Linux display driver inside WSL.
 
-## 第一次使用
+## First-time setup
 
-先在 WSL2 安装最小系统依赖：
+Install the minimal system dependencies inside WSL2:
 
 ```bash
 sudo apt update
 sudo apt install --yes git curl ca-certificates tar
 ```
 
-然后把仓库 clone 到 WSL 文件系统并执行：
+Clone the repository into the WSL Linux filesystem, then run:
 
 ```bash
 cd ~/projects/imu-fall-benchmark
@@ -36,11 +36,11 @@ cd ~/projects/imu-fall-benchmark
 ./benchmark smoke
 ```
 
-`setup` 会在 `~/imu-fall-work` 中安装或复用固定版本的 Miniforge、Google Cloud CLI 和 CUDA Python 环境，不会修改系统 Python。第一次安装通常需要 20–60 分钟，并建议预留至少 25 GiB 空间。
+`setup` installs or reuses pinned Miniforge, Google Cloud CLI, and CUDA Python environments under `~/imu-fall-work`. It does not modify the system Python installation. A first installation normally takes 20–60 minutes and should have at least 25 GiB of free disk space.
 
-`data pull` 首次执行时会要求登录 Google 账号。它只下载 `current.json` 指向的不可变 snapshot，随后逐文件核对 SHA-256、HDF5 v3.1 结构、逻辑指纹和统计值。仓库不需要 Git LFS。每个 WSL 用户只需登录一次：首次必须在可交互的 WSL 终端直接执行该命令；无 TTY 的 SSH/Codex 自动化不会复制宿主机凭据，也不会在无法输入验证码时继续。登录完成后，后续拉取可以自动运行。
+The first `data pull` asks the user to sign in to Google. It downloads only the immutable snapshot referenced by `current.json`, then checks each file's SHA-256, HDF5 v3.1 structure, logical fingerprint, and statistics. Git LFS is not required. Each WSL user signs in only once: the first command must be run directly in an interactive WSL terminal. Non-interactive SSH or Codex automation neither copies host credentials nor continues when authentication requires input. Later pulls can run automatically after sign-in.
 
-## 日常命令
+## Routine commands
 
 ```bash
 ./benchmark data status
@@ -51,82 +51,82 @@ cd ~/projects/imu-fall-benchmark
 ./benchmark smoke
 ```
 
-- `data status`：比较本地 active manifest 和远程 current pointer；
-- `data pull`：原子下载和激活最新 base/team snapshot；
-- `validate-data`：检查全部 HDF5、hash、统计值与 participant fold；
-- `test`：执行 Ruff 与 pytest；
-- `doctor`：检查 WSL2、CUDA、GPU 和七种模型后端；
-- `smoke`：运行经过限量的 fold-0 七模型端到端测试，可复用兼容 checkpoint。
+- `data status`: compare the active local manifest with the remote current pointer;
+- `data pull`: atomically download and activate the latest base and team snapshots;
+- `validate-data`: verify all HDF5 files, hashes, statistics, and participant folds;
+- `test`: run Ruff and pytest;
+- `doctor`: verify WSL2, CUDA, the GPU, and all seven model backends;
+- `smoke`: run a bounded fold-0, seven-model end-to-end check with compatible checkpoint reuse.
 
-## 数据合同
+## Data contract
 
-机器可读合同位于 [`configs/contracts/imu_benchmark_contract_v2.json`](configs/contracts/imu_benchmark_contract_v2.json)，关键规则如下：
+The machine-readable contract is [`configs/contracts/imu_benchmark_contract_v2.json`](configs/contracts/imu_benchmark_contract_v2.json). Its key rules are:
 
-- HDF5 schema：`3.1.0`；
-- 输入：25 Hz、六轴 IMU、`float32`、sensor-local 坐标系、保留重力；
-- 窗口：50 帧，即 2 秒；
-- 步长：物理时间 0.5 秒；在 25 Hz 上使用 half-up 网格，起点为 `0, 13, 25, 38, ...`；
-- 决策时间：窗口最后一帧；
-- 正样本：决策时间落在半开跌倒区间 `[fall_start, fall_stop)` 内；
-- 与明确 `exclude` 区间相交的窗口会被排除；
-- 已经越过跌倒区间终点、但仍包含跌倒尾部的窗口会被排除，避免用跌倒后的信息制造负样本；
-- 当前事件检测规则：一个正窗口即视为检测到该跌倒。N-of-M、冷却时间和告警合并属于后续产品策略实验。
+- HDF5 schema: `3.1.0`;
+- input: 25 Hz, six-axis IMU, `float32`, sensor-local coordinates, gravity retained;
+- window: 50 frames, or 2 seconds;
+- stride: 0.5 seconds in physical time, using half-up grid starts `0, 13, 25, 38, ...` at 25 Hz;
+- decision time: the final frame of a window;
+- positive sample: the decision time is inside the half-open interval `[fall_start, fall_stop)`;
+- a window intersecting an explicit `exclude` interval is removed;
+- a window whose decision time is after a fall interval but that still contains its tail is removed, avoiding negative samples that use post-fall information;
+- current event rule: one positive window counts as detecting the fall. N-of-M rules, cooldown periods, and alert merging are future product-policy experiments.
 
-原始 public snapshot 包含 9 个 HDF5 shard。KFall 和 UNIVRFall 提供可用的跌倒时间区间；只有 recording 标注的数据中，ADL recording 可以提供负窗口，但 fall recording 因缺少区间不会被当作时序正样本。后续标注平台产生的 CW12EU 数据必须包含时序区间。
+The public base snapshot contains nine HDF5 shards. KFall and UNIVRFall provide usable temporal fall intervals. In datasets with recording-level labels only, ADL recordings can provide negative windows, while fall recordings without temporal intervals are not used as temporal positives. Future CW12EU snapshots from the annotation platform must contain temporal intervals.
 
-## Fold 与 team 数据
+## Folds and team data
 
-公共数据使用固定的 participant-disjoint 五折：测试 fold 为 `k`，验证 fold 为 `(k + 1) mod 5`，其余三折训练。阈值只根据验证 fold 的 Balanced Accuracy 选择。
+Public data uses fixed, participant-disjoint five-fold evaluation. For test fold `k`, validation uses `(k + 1) mod 5`, and the other three folds are used for training. Thresholds are selected only from validation-fold Balanced Accuracy.
 
-标注平台持续产生的 team snapshot 使用 `fold_id = -1`：
+Team snapshots produced by the annotation platform use `fold_id = -1`:
 
-- 可以加入每个 fold 的训练集；
-- 永远不能进入验证集或测试集；
-- 这样有限的内部设备数据可帮助训练，但不会让模型在自己见过的 participant/recording 上得到虚高的评估结果。
+- they may be added to the training set of every fold;
+- they must never enter validation or test sets;
+- this allows limited device-specific data to assist training without inflating evaluation by testing on participants or recordings seen during training.
 
-任何数据 snapshot、fold、合同或实验配置变化都会改变 cache/run 指纹。旧 run 不会被静默复用。
+Any change to a data snapshot, fold, contract, or experiment configuration changes the cache and run fingerprints. Old runs are never reused silently.
 
-## 实验配置
+## Experiment configurations
 
-当前保留三种入口：
+Three entry points are currently retained:
 
-| 配置 | 用途 |
+| Configuration | Purpose |
 |---|---|
-| `temporal_smoke_v1.yaml` | 限量端到端检查，不作为模型结论 |
-| `kfall_fold0_regression_v1.yaml` | KFall 单折完整回归参考 |
-| `all_temporal_fold0_pilot_v1.yaml` | 全部可用时序数据的单折工程 pilot |
+| `temporal_smoke_v1.yaml` | Bounded end-to-end check; not model evidence |
+| `kfall_fold0_regression_v1.yaml` | Full KFall single-fold regression reference |
+| `all_temporal_fold0_pilot_v1.yaml` | Single-fold engineering pilot over all usable temporal data |
 
-先查看计划，再运行：
+Inspect a plan before running it:
 
 ```bash
 ./benchmark plan configs/experiments/all_temporal_fold0_pilot_v1.yaml
 ./benchmark run configs/experiments/all_temporal_fold0_pilot_v1.yaml --resume
 ```
 
-七种模型为 Threshold Impact、cuML Logistic Regression、cuML Random Forest、CUDA XGBoost、PyTorch 1D CNN、PyTorch LSTM 和 PyTorch CNN-LSTM。三个表格模型读取 158 个工程特征；三个深度时序模型读取 `50 × 6` 原始窗口；Threshold Impact 直接读取原始窗口。
+The seven models are Threshold Impact, cuML Logistic Regression, cuML Random Forest, CUDA XGBoost, PyTorch 1D CNN, PyTorch LSTM, and PyTorch CNN-LSTM. The three tabular models consume 158 engineered features; the three deep sequence models consume raw `50 x 6` windows; Threshold Impact reads the raw window directly.
 
-所有配置都固定 fold、seed、精度、epoch/patience 与数据合同。单 fold pilot 是工程证据，不等于最终多折模型验证。
+Every configuration fixes the fold, seed, precision, epoch and patience settings, and data contract. A single-fold pilot is engineering evidence, not final multi-fold model validation.
 
-## 输出和恢复
+## Outputs and recovery
 
-默认生成内容全部保存在仓库外：
+Generated content is stored outside the repository by default:
 
 ```text
 ~/imu-fall-work/
-├── data/                 # 已验证的 immutable snapshots 与 active.json
-├── cache/                # 50×6 窗口和 158 特征的内容寻址缓存
-├── envs/                 # 固定依赖环境
-├── runs/<run-id>/        # 配置、checkpoint、指标、日志和报告
-└── toolchains/           # Miniforge 与 Google Cloud CLI
+├── data/                 # Verified immutable snapshots and active.json
+├── cache/                # Content-addressed 50x6 windows and 158 features
+├── envs/                 # Pinned dependency environments
+├── runs/<run-id>/        # Configs, checkpoints, metrics, logs, and reports
+└── toolchains/           # Miniforge and Google Cloud CLI
 ```
 
-可以把 `IMU_BENCH_WORK_ROOT` 设置为其他绝对路径。每个 job 完成后会原子写入 checkpoint；中断后使用 `--resume`，只会复用配置和数据指纹完全一致的结果。
+Set `IMU_BENCH_WORK_ROOT` to another absolute path if needed. Each completed job writes its checkpoint atomically. After an interruption, `--resume` reuses only results whose configuration and data fingerprints match exactly.
 
-主要输出包括 `resolved_config.yaml`、`environment.json`、`provenance.json`、`events.jsonl`、`jobs/*.npz`、`metrics.csv`、`event_metrics.csv`、`subgroup_metrics.csv`、`performance.json` 和 `report.md`。
+Primary outputs include `resolved_config.yaml`, `environment.json`, `provenance.json`, `events.jsonl`, `jobs/*.npz`, `metrics.csv`, `event_metrics.csv`, `subgroup_metrics.csv`, `performance.json`, and `report.md`.
 
-## 数据发布结构
+## Data publication layout
 
-默认 bucket 为 `gs://soft3888-label`，也可通过 `IMU_BENCH_DATA_BUCKET=gs://bucket-name` 覆盖。benchmark 只使用以下前缀：
+The default bucket is `gs://soft3888-label`. Override it with `IMU_BENCH_DATA_BUCKET=gs://bucket-name`. The benchmark uses only this prefix:
 
 ```text
 benchmark-datasets/
@@ -138,14 +138,12 @@ benchmark-datasets/
 └── team/cw12eu/current.json
 ```
 
-`benchmark-datasets/` 已启用为 GCS managed folder，组员的只读 IAM 只应绑定到该资源，不能授予
-整个 bucket 的 Viewer。snapshot 对象不可覆盖；`current.json` 只是一个小型显式指针。发布公共
-base 是维护操作：
+`benchmark-datasets/` is a GCS managed folder. Team read-only IAM should be bound only to this resource, not to the entire bucket. Snapshot objects are immutable; `current.json` is a small, explicit pointer. Publishing the public base is a maintainer operation:
 
 ```bash
 ./benchmark data publish-base --source-dir /path/to/reviewed/imu_25hz
 ```
 
-日常用户只执行 `data pull`，不需要 bucket 写权限。任何凭据、登录缓存、HDF5、运行结果和本地 `TODO.md` 都不能提交到 Git。
+Routine users only run `data pull` and do not need bucket write access. Credentials, login caches, HDF5 files, run outputs, and the local `TODO.md` must never be committed to Git.
 
-协作规则见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for collaboration rules.
