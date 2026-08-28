@@ -1,20 +1,20 @@
 # Distributed IMU Data
 
-This repository distributes six pipeline-generated HDF5 v3 files. Five recording-labelled
-datasets under `data/imu_30hz/` are used for model fitting. KFall under `data/external/` is a
-temporally labelled, lower-back external evaluation set. Raw archives and ingestion adapters are
-intentionally outside this benchmark repository.
+This repository distributes six pipeline-generated HDF5 v3 files. KFall under `data/external/`
+is the primary temporally supervised dataset. Five recording-labelled datasets under
+`data/imu_30hz/` are retained for research-only ADL supplementation and recording-level MIL.
+Raw archives and ingestion adapters are intentionally outside this benchmark repository.
 
 ## Sources
 
 | Dataset ID | Role | Source | Participants | Locations used | Source frequency |
 |---|---|---|---:|---|---:|
-| `cgu_bes` | training | [CGU-BES on Figshare](https://figshare.com/articles/dataset/CGU-BES_Dataset_for_Fall_and_Activity_of_Daily_Life/7016306) | 15 | chest | 200 Hz |
-| `uci_455` | training | [UCI Simulated Falls and ADLs](https://archive.ics.uci.edu/dataset/455/simulated+falls+and+daily+living+activities+data+set) | 17 | chest, waist | 25 Hz |
-| `umafall` | training | [UMAFall on Figshare](https://figshare.com/articles/dataset/UMA_ADL_FALL_Dataset_zip/4214283) | 19 IDs | chest, waist | 20 Hz |
-| `sisfall` | training | [SisFall paper](https://pmc.ncbi.nlm.nih.gov/articles/PMC5298771/) | 38 | waist | 200 Hz |
-| `upfall` | training | [UP-Fall official site](https://sites.google.com/up.edu.mx/har-up/) | 17 | belt mapped to waist | irregular, about 15–21 Hz |
-| `kfall` | external only | [KFall official site](https://sites.google.com/view/kfalldataset) | 32 used | lower back | 100 Hz |
+| `cgu_bes` | research: recording/ADL | [CGU-BES on Figshare](https://figshare.com/articles/dataset/CGU-BES_Dataset_for_Fall_and_Activity_of_Daily_Life/7016306) | 15 | chest | 200 Hz |
+| `uci_455` | research: recording/ADL | [UCI Simulated Falls and ADLs](https://archive.ics.uci.edu/dataset/455/simulated+falls+and+daily+living+activities+data+set) | 17 | chest, waist | 25 Hz |
+| `umafall` | research: recording/ADL | [UMAFall on Figshare](https://figshare.com/articles/dataset/UMA_ADL_FALL_Dataset_zip/4214283) | 19 IDs | chest, waist | 20 Hz |
+| `sisfall` | research: recording/ADL | [SisFall paper](https://pmc.ncbi.nlm.nih.gov/articles/PMC5298771/) | 38 | waist | 200 Hz |
+| `upfall` | research: recording/ADL | [UP-Fall official site](https://sites.google.com/up.edu.mx/har-up/) | 17 | belt mapped to waist | irregular, about 15–21 Hz |
+| `kfall` | primary temporal | [KFall official site](https://sites.google.com/view/kfalldataset) | 32 used | lower back | 100 Hz |
 
 Licensing, attribution, source hashes, exclusion counts, resampling methods, and processing notes
 are stored as root HDF5 attributes. `data/checksums.sha256` protects the distributed bytes, while
@@ -79,10 +79,9 @@ global `samples` dataset.
 Acceleration retains gravity, and axes remain in each device's sensor-local coordinate frame.
 The benchmark does not remove gravity or rotate data into a common body coordinate frame.
 
-## KFall status and usage boundary
+## Supervision and KFall boundary
 
-KFall is external-only and is not listed in `participant_folds_v2.csv`. Its independent
-participant assignments are in `kfall_external_folds_v1.csv`. The current adapter output is
+KFall has an independent participant split in `kfall_external_folds_v1.csv`. The current adapter output is
 provisional because onset/impact may be shifted by one 30 Hz sample, ADL codes are placeholders,
 and the activity end is derived as impact plus one second.
 
@@ -92,6 +91,11 @@ impact-plus-one-second tail. A window that overlaps the segment but decides afte
 excluded. The resulting cache contains 53,365 retained windows: 8,027 positive and 45,338
 negative. It excludes 9,120 post-segment overlap windows; 4 of 2,346 events have no retained
 positive decision window and count as misses in event-level sensitivity.
+
+The five other datasets do not contain reliable fall intervals. Their fall recordings must not be
+silently relabelled as positive temporal windows. The primary view excludes those recordings;
+the mixed view may use only their recording-labelled ADL windows as training negatives, while the
+separate MIL view keeps recording labels and top-10% pooling. Both alternatives are research-only.
 
 The exact distributed snapshot is declared in `data/snapshot_v1.json`. The machine-readable
 window, temporal-supervision, resampling, MIL, fold-evolution, and metric rules are declared in
@@ -110,15 +114,17 @@ git lfs fsck
 The validator checks exact file membership, SHA-256 values, v3 schema/dtypes, contiguous sequence
 ranges, annotation bounds and ordering, declared counts, and participant-fold coverage.
 
-Do not copy an arbitrary HDF5 file into these directories. A new distributed dataset requires a
-v3-compatible ingestion output, a dataset-namespaced participant mapping, an explicit training or
-external role, a split entry, an updated checksum manifest, and validator expectations. Changes
-to source content, splits, or temporal policy intentionally create a new derived-cache fingerprint.
+Do not copy an arbitrary HDF5 file into these directories. A new distributed dataset requires:
 
-Before editing a split, use the read-only planner to retain current assignments and preview only
-new participants:
+1. a v3-compatible, immutable HDF5 output and documented licence/attribution;
+2. dataset-namespaced participant and recording IDs;
+3. a participant fold CSV with a new explicit split version;
+4. a snapshot entry and matching `data/checksums.sha256` row;
+5. a data-view YAML that states whether it may train, supplement, or evaluate;
+6. `./benchmark validate-data`, cache regression, and smoke acceptance before use.
 
-```bash
-./benchmark plan-folds --collection training --format csv
-./benchmark plan-folds --collection external --format csv
-```
+The generic cache discovers datasets from the snapshot and split manifests. A new temporal HDF5
+therefore does not require a dataset-specific training runner, but ingestion and HDF5 validation
+remain separate responsibilities. Preserve all existing fold assignments when adding participants;
+review and version the new split rather than overwriting the old one in place. Any source, split,
+contract, or snapshot change intentionally creates a new cache and run fingerprint.
