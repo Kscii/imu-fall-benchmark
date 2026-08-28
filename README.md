@@ -100,6 +100,13 @@ KFall split, 50 maximum epochs, and patience 8. These pilots check full-scale ex
 checkpointing, performance, and numerical sanity. A single provisional fold is not formal
 model-validation evidence.
 
+On the reference machine with the unified cache already present, the first FP32 pilot invocation
+took 39.6 seconds and the BF16 pilot took 59.4 seconds. BF16 was not a general speed-up: compared
+with FP32, model fit was about 4% slower for 1D CNN, 50% faster for LSTM, and 8 times slower for
+CNN-LSTM. Because early-stopping trajectories also differed, these are end-to-end engineering
+timings rather than fixed-epoch kernel benchmarks. FP32 therefore remains the default until a
+separate profiling task justifies a model-specific precision policy.
+
 The configuration is split deliberately into three small layers:
 
 - `configs/experiments/`: folds, seeds, precision, GPU mode, training limits, and selected models;
