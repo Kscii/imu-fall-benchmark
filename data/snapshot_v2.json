@@ -1,13 +1,13 @@
 {
-  "snapshot_version": "imu_30hz_snapshot_v1",
+  "snapshot_version": "imu_30hz_snapshot_v2",
   "contract_version": "imu_benchmark_contract_v1",
   "collections": {
     "training": {
       "data_path": "data/imu_30hz",
       "split": {
-        "path": "data/splits/participant_folds_v2.csv",
-        "version": "participant_5fold_v2",
-        "sha256": "c86a5ff39fe4479db19e92840bb659d78ddc7f1f6a8481084553ee036bcddf30"
+        "path": "data/splits/participant_folds_v3.csv",
+        "version": "participant_5fold_v3",
+        "sha256": "422d97649700cc16b794bdae268ac306fe2567fcf7df935e49af1b4f2ab7b4e2"
       },
       "datasets": [
         {
@@ -23,8 +23,53 @@
           "events": 0,
           "segments": 0,
           "fall_sequences": 60,
-          "supervision": {"recording": 195},
-          "body_locations": {"chest": 195}
+          "supervision": {
+            "recording": 195
+          },
+          "body_locations": {
+            "chest": 195
+          }
+        },
+        {
+          "dataset_id": "ipqm_fall",
+          "path": "data/imu_30hz/ipqm_fall.h5",
+          "sha256": "e951bdad36b222f89d1ff2f521f3ae41232c233eda72b9e7f29c9e80351ed554",
+          "logical_content_sha256": "9ec121c6ff3478219e94d82d9617140d3362ad9a106b77091d897cd4ad2d2ab1",
+          "size_bytes": 25369447,
+          "participants": 15,
+          "sequences": 1655,
+          "rows": 1204820,
+          "annotations": 0,
+          "events": 0,
+          "segments": 0,
+          "fall_sequences": 611,
+          "supervision": {
+            "recording": 1655
+          },
+          "body_locations": {
+            "chest": 1655
+          }
+        },
+        {
+          "dataset_id": "sfu_ipml",
+          "path": "data/imu_30hz/sfu_ipml.h5",
+          "sha256": "318c945fa1f1b6043f2220766a297d658bbf77d0469fbefee4f009daaffee4ba",
+          "logical_content_sha256": "e63a5cc09c15ddd4544ae825cc6a75297a11dc7a9837f669411bb4e36655e0f4",
+          "size_bytes": 11499671,
+          "participants": 10,
+          "sequences": 1200,
+          "rows": 558900,
+          "annotations": 0,
+          "events": 0,
+          "segments": 0,
+          "fall_sequences": 420,
+          "supervision": {
+            "recording": 1200
+          },
+          "body_locations": {
+            "chest": 600,
+            "waist": 600
+          }
         },
         {
           "dataset_id": "sisfall",
@@ -39,8 +84,12 @@
           "events": 0,
           "segments": 0,
           "fall_sequences": 1798,
-          "supervision": {"recording": 4505},
-          "body_locations": {"waist": 4505}
+          "supervision": {
+            "recording": 4505
+          },
+          "body_locations": {
+            "waist": 4505
+          }
         },
         {
           "dataset_id": "uci_455",
@@ -55,8 +104,13 @@
           "events": 0,
           "segments": 0,
           "fall_sequences": 3134,
-          "supervision": {"recording": 5705},
-          "body_locations": {"chest": 2945, "waist": 2760}
+          "supervision": {
+            "recording": 5705
+          },
+          "body_locations": {
+            "chest": 2945,
+            "waist": 2760
+          }
         },
         {
           "dataset_id": "umafall",
@@ -71,8 +125,33 @@
           "events": 0,
           "segments": 0,
           "fall_sequences": 397,
-          "supervision": {"recording": 1362},
-          "body_locations": {"chest": 745, "waist": 617}
+          "supervision": {
+            "recording": 1362
+          },
+          "body_locations": {
+            "chest": 745,
+            "waist": 617
+          }
+        },
+        {
+          "dataset_id": "univrfall",
+          "path": "data/imu_30hz/univrfall.h5",
+          "sha256": "f95d42e806a9efe1d8b01797e547c52e30cf250347606a3b3507409d3843fa96",
+          "logical_content_sha256": "27510ec16e290d66a3b03a45f8e6e3a81415e28244dc3e3abd98ec34b0a23ddb",
+          "size_bytes": 8189141,
+          "participants": 29,
+          "sequences": 1224,
+          "rows": 367249,
+          "annotations": 3516,
+          "events": 573,
+          "segments": 2370,
+          "fall_sequences": 573,
+          "supervision": {
+            "temporal": 1224
+          },
+          "body_locations": {
+            "lower_back": 1224
+          }
         },
         {
           "dataset_id": "upfall",
@@ -87,8 +166,12 @@
           "events": 0,
           "segments": 1165,
           "fall_sequences": 255,
-          "supervision": {"recording": 551},
-          "body_locations": {"waist": 551}
+          "supervision": {
+            "recording": 551
+          },
+          "body_locations": {
+            "waist": 551
+          }
         }
       ]
     },
@@ -113,8 +196,12 @@
           "events": 2346,
           "segments": 9767,
           "fall_sequences": 2346,
-          "supervision": {"temporal": 5075},
-          "body_locations": {"lower_back": 5075}
+          "supervision": {
+            "temporal": 5075
+          },
+          "body_locations": {
+            "lower_back": 5075
+          }
         }
       ]
     }

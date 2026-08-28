@@ -1,19 +1,23 @@
 # Distributed IMU Data
 
-This repository distributes six pipeline-generated HDF5 v3 files. KFall under `data/external/`
-is the primary temporally supervised dataset. Five recording-labelled datasets under
-`data/imu_30hz/` are retained for research-only ADL supplementation and recording-level MIL.
-Raw archives and ingestion adapters are intentionally outside this benchmark repository.
+This repository distributes nine pipeline-generated HDF5 v3 files. KFall under `data/external/`
+is the primary temporally supervised dataset, and UNIVRFall under `data/imu_30hz/` is a second
+research-only temporal source. The other seven recording-labelled datasets are retained for
+research-only non-fall supplementation and recording-level MIL. Raw archives and ingestion
+adapters are intentionally outside this benchmark repository.
 
 ## Sources
 
 | Dataset ID | Role | Source | Participants | Locations used | Source frequency |
 |---|---|---|---:|---|---:|
 | `cgu_bes` | research: recording/ADL | [CGU-BES on Figshare](https://figshare.com/articles/dataset/CGU-BES_Dataset_for_Fall_and_Activity_of_Daily_Life/7016306) | 15 | chest | 200 Hz |
+| `ipqm_fall` | research: recording/ADL | [IPqM-Fall v2 on Zenodo](https://zenodo.org/records/20431609) | 15 | chest | 90 Hz |
+| `sfu_ipml` | research: recording/ADL | [SFU IPML on FRDR](https://www.frdr-dfdr.ca/repo/dataset/6998d4cd-bd13-4776-ae60-6d80221e0365) | 10 | chest, waist | 128 Hz |
 | `uci_455` | research: recording/ADL | [UCI Simulated Falls and ADLs](https://archive.ics.uci.edu/dataset/455/simulated+falls+and+daily+living+activities+data+set) | 17 | chest, waist | 25 Hz |
 | `umafall` | research: recording/ADL | [UMAFall on Figshare](https://figshare.com/articles/dataset/UMA_ADL_FALL_Dataset_zip/4214283) | 19 IDs | chest, waist | 20 Hz |
 | `sisfall` | research: recording/ADL | [SisFall paper](https://pmc.ncbi.nlm.nih.gov/articles/PMC5298771/) | 38 | waist | 200 Hz |
 | `upfall` | research: recording/ADL | [UP-Fall official site](https://sites.google.com/up.edu.mx/har-up/) | 17 | belt mapped to waist | irregular, about 15–21 Hz |
+| `univrfall` | research: temporal | [UNIVRFall v1 on Zenodo](https://zenodo.org/records/18346755) | 29 | lower back | 100 Hz |
 | `kfall` | primary temporal | [KFall official site](https://sites.google.com/view/kfalldataset) | 32 used | lower back | 100 Hz |
 
 Licensing, attribution, source hashes, exclusion counts, resampling methods, and processing notes
@@ -26,14 +30,18 @@ physical encoding.
 | Dataset ID | Sequences | 30 Hz frames | Annotations | Fall events | Approximate size |
 |---|---:|---:|---:|---:|---:|
 | `cgu_bes` | 195 | 96,488 | 0 | 0 | 2.0 MiB |
+| `ipqm_fall` | 1,655 | 1,204,820 | 0 | 0 | 24 MiB |
+| `sfu_ipml` | 1,200 | 558,900 | 0 | 0 | 11 MiB |
 | `uci_455` | 5,705 | 3,270,374 | 0 | 0 | 65 MiB |
 | `umafall` | 1,362 | 608,590 | 0 | 0 | 13 MiB |
 | `sisfall` | 4,505 | 2,378,936 | 0 | 0 | 48 MiB |
 | `upfall` | 551 | 485,830 | 1,165 | 0 | 9.2 MiB |
-| **Training total** | **12,318** | **6,840,218** | **1,165** | **0** | **about 137 MiB** |
+| `univrfall` | 1,224 | 367,249 | 3,516 | 573 | 7.8 MiB |
+| **Training total** | **16,397** | **8,971,187** | **4,681** | **573** | **about 178 MiB** |
 | `kfall` external | 5,075 | 1,200,811 | 14,459 | 2,346 | 27 MiB |
+| **Distributed total** | **21,472** | **10,171,998** | **19,140** | **2,919** | **about 205 MiB** |
 
-The training split contains 106 source-namespaced participants. The independent KFall split
+The training split contains 160 source-namespaced participants. The independent KFall split
 contains 32 participants. A physical recording may contain more than one body-location sequence,
 so the sequence count can exceed the recording count.
 
@@ -65,7 +73,7 @@ Each file has exactly three root datasets:
 | `source_file` | Source archive member used to build the sequence |
 | `participant_id` | Dataset-namespaced participant ID |
 | `recording_id` | Dataset-namespaced physical recording ID |
-| `body_location` | `chest`, `waist`, or external `lower_back` |
+| `body_location` | `chest`, `waist`, or `lower_back` |
 | `activity_code` | Source activity code or documented placeholder |
 | `is_fall` | Recording-level fall label |
 | `supervision_kind` | `recording` or `temporal` |
@@ -79,7 +87,7 @@ global `samples` dataset.
 Acceleration retains gravity, and axes remain in each device's sensor-local coordinate frame.
 The benchmark does not remove gravity or rotate data into a common body coordinate frame.
 
-## Supervision and KFall boundary
+## Supervision boundaries
 
 KFall has an independent participant split in `kfall_external_folds_v1.csv`. The current adapter output is
 provisional because onset/impact may be shifted by one 30 Hz sample, ADL codes are placeholders,
@@ -92,15 +100,25 @@ excluded. The resulting cache contains 53,365 retained windows: 8,027 positive a
 negative. It excludes 9,120 post-segment overlap windows; 4 of 2,346 events have no retained
 positive decision window and count as misses in event-level sensitivity.
 
-The five other datasets do not contain reliable fall intervals. Their fall recordings must not be
-silently relabelled as positive temporal windows. The primary view excludes those recordings;
-the mixed view may use only their recording-labelled ADL windows as training negatives, while the
-separate MIL view keeps recording labels and top-10% pooling. Both alternatives are research-only.
+UNIVRFall contributes 573 fall events with source onset and impact annotations. Its half-open fall
+interval stops one canonical sample after impact so that the impact sample is included, without an
+adapter-derived post-impact tail. It is exposed through a separate research-only temporal smoke
+view and is not yet presented as cross-dataset validation.
 
-The exact distributed snapshot is declared in `data/snapshot_v1.json`. The machine-readable
+The seven recording-labelled datasets do not contain reliable fall intervals. Their fall
+recordings must not be silently relabelled as positive temporal windows. The primary view excludes
+those recordings; the mixed view may use only non-fall windows as training negatives, while the
+separate MIL view keeps recording labels and top-10% pooling. UP-Fall activity-state intervals do
+not provide source onset/impact points. Both alternatives are research-only.
+
+The exact distributed snapshot is declared in `data/snapshot_v2.json`. The machine-readable
 window, temporal-supervision, resampling, MIL, fold-evolution, and metric rules are declared in
 `configs/contracts/imu_benchmark_contract_v1.json`. Changing source bytes, logical HDF5 content,
 split files, or the contract intentionally creates a different derived-cache fingerprint.
+
+Only snapshot v2 is supported by the current source tree. Reproducing snapshot v1 requires
+checking out the historical commit that contains its manifests and code; old run artefacts should
+not be relabelled or migrated to v2.
 
 ## Validation and adding data
 
