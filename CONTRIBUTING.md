@@ -24,6 +24,8 @@ uv run pytest -q
 
 Formal training, `doctor`, and `smoke` still require WSL2 with NVIDIA CUDA.
 
+GitHub Actions runs only the shell syntax check, Ruff, and data-independent pytest suite on a CPU runner. A green CI check does not replace WSL2/CUDA, GCS, or real-data acceptance.
+
 ## Data and contract rules
 
 - Do not commit `*.h5`, caches, runs, model checkpoints, cloud credentials, or the local `TODO.md`.
