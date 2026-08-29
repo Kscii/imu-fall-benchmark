@@ -79,6 +79,23 @@ def _render_data(console: Console, action: str, result: dict[str, Any]) -> None:
         )
 
 
+def _render_results(console: Console, action: str, result: dict[str, Any]) -> None:
+    _status(console, f"results {action}", result)
+    console.print(f"Run ID: {result['run_id']} | Bucket: {result['bucket']}")
+    if action == "publish":
+        console.print(
+            f"Files: {result['files']} | Bundle SHA-256: {result['bundle_sha256']}"
+        )
+        console.print(f"Manifest: {result['manifest_object']}")
+    elif action == "verify":
+        console.print(
+            f"Files: {result['files']} | Local validated: "
+            f"{result['local_validated']} | Bundle SHA-256: {result['bundle_sha256']}"
+        )
+    elif action == "pull":
+        console.print(f"Path: {result['path']} | Reused: {result['reused']}")
+
+
 def _render_validation(console: Console, result: dict[str, Any]) -> None:
     _status(console, "HDF5 v3.1 data validation", result)
     table = Table(box=box.SIMPLE, show_header=True)
@@ -141,6 +158,7 @@ def render_result(
     result: dict[str, Any],
     *,
     data_action: str | None = None,
+    results_action: str | None = None,
     stream: IO[str] = sys.stdout,
 ) -> None:
     console = _console(stream)
@@ -151,6 +169,9 @@ def render_result(
         _render_data(console, data_action, result)
     elif command == "validate-data":
         _render_validation(console, result)
+    elif command == "results":
+        assert results_action is not None
+        _render_results(console, results_action, result)
     elif command in {"smoke", "run"}:
         _render_benchmark(console, result)
     elif command == "plan":

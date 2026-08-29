@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .cloud_data import BASE_MANIFEST_PATH, activate_base, data_status, publish_base, pull_data
+from .cloud_results import publish_result, pull_result, verify_result
 from .configuration import load_experiment
 from .dataset import validate_data
 from .device import CudaUnavailable
@@ -196,6 +197,17 @@ def _parser() -> argparse.ArgumentParser:
         "--manifest", type=Path, default=PROJECT_ROOT / BASE_MANIFEST_PATH
     )
     activate.add_argument("--expected-current", required=True)
+    results = commands.add_parser(
+        "results", help="Publish, pull, or verify immutable benchmark results"
+    )
+    result_commands = results.add_subparsers(dest="results_command", required=True)
+    for action, help_text in (
+        ("publish", "Publish one completed temporal-core run"),
+        ("pull", "Download and validate one immutable result bundle"),
+        ("verify", "Verify one remote result bundle and optional local run"),
+    ):
+        result_command = result_commands.add_parser(action, help=help_text)
+        result_command.add_argument("run_id")
     split = commands.add_parser("split", help="Propose sticky participant folds")
     split_commands = split.add_subparsers(dest="split_command", required=True)
     propose = split_commands.add_parser(
@@ -266,6 +278,14 @@ def _dispatch(args: argparse.Namespace, reporter: ProgressReporter) -> dict[str,
             snapshot_path=paths.data / "active.json",
             progress=reporter,
         )
+    if args.command == "results":
+        if args.results_command == "publish":
+            return publish_result(paths.runs, args.run_id, progress=reporter)
+        if args.results_command == "pull":
+            return pull_result(paths.runs, args.run_id, progress=reporter)
+        if args.results_command == "verify":
+            return verify_result(paths.runs, args.run_id, progress=reporter)
+        raise AssertionError(f"Unhandled results command: {args.results_command}")
     if args.command == "split":
         if args.split_command == "propose":
             output_dir = (
@@ -307,7 +327,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True, allow_nan=True))
     else:
-        render_result(args.command, result, data_action=getattr(args, "data_command", None))
+        render_result(
+            args.command,
+            result,
+            data_action=getattr(args, "data_command", None),
+            results_action=getattr(args, "results_command", None),
+        )
 
 
 if __name__ == "__main__":
