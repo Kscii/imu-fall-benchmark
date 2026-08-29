@@ -12,6 +12,7 @@ import h5py
 import numpy as np
 
 from .contract import DEFAULT_CONTRACT_PATH, default_active_snapshot_path, load_contract_snapshot
+from .progress import NullProgressReporter, ProgressReporter
 
 EXPECTED_SCHEMA_VERSION = "3.1.0"
 FEATURE_COLUMNS = (
@@ -358,6 +359,8 @@ def _validate_collection(
     active_root: Path,
     collection: dict[str, object],
     expected_role: str,
+    progress: ProgressReporter,
+    collection_name: str,
 ) -> tuple[dict[str, int], set[tuple[str, str]], list[dict[str, object]]]:
     data_root = active_root / str(collection["data_path"])
     entries = collection["datasets"]
@@ -370,40 +373,56 @@ def _validate_collection(
     totals = {"sequences": 0, "rows": 0, "annotations": 0, "events": 0, "segments": 0}
     participants: set[tuple[str, str]] = set()
     datasets: list[dict[str, object]] = []
-    for path in _data_files(data_root, expected_ids):
-        result = _check_file(path)
-        dataset_id = str(result["dataset_id"])
-        entry = entry_by_id[dataset_id]
-        expected_path = (data_root / str(entry["path"])).resolve()
-        if path.resolve() != expected_path:
-            raise ValueError(f"Snapshot path mismatch for {dataset_id}")
-        if path.stat().st_size != int(entry["size_bytes"]):
-            raise ValueError(f"Snapshot size mismatch for {dataset_id}")
-        if _sha256(path) != str(entry["sha256"]):
-            raise ValueError(f"Snapshot SHA-256 mismatch for {dataset_id}")
-        dataset_participants = result.pop("participants")
-        if not isinstance(dataset_participants, set):
-            raise ValueError(f"Invalid participant summary for {dataset_id}")
-        if "participants" in entry and len(dataset_participants) != int(entry["participants"]):
-            raise ValueError(f"Participant count mismatch for {dataset_id}")
-        for field in (
-            "sequences",
-            "rows",
-            "annotations",
-            "logical_content_sha256",
-            "evaluation_role",
-        ):
-            if result[field] != entry[field]:
-                raise ValueError(f"Snapshot {field} mismatch for {dataset_id}")
-        for field in ("events", "segments", "fall_sequences", "supervision", "body_locations"):
-            if field in entry and result[field] != entry[field]:
-                raise ValueError(f"Snapshot {field} mismatch for {dataset_id}")
-        if result["evaluation_role"] != expected_role:
-            raise ValueError(f"Unexpected evaluation role for {dataset_id}")
-        participants.update((dataset_id, value) for value in dataset_participants)
-        for name in totals:
-            totals[name] += int(result[name])
-        datasets.append(result)
+    files = _data_files(data_root, expected_ids)
+    with progress.task(
+        f"Validating {collection_name} HDF5 files",
+        total=len(files),
+        unit="files",
+    ) as task:
+        for path in files:
+            task.update(detail=path.name)
+            result = _check_file(path)
+            dataset_id = str(result["dataset_id"])
+            entry = entry_by_id[dataset_id]
+            expected_path = (data_root / str(entry["path"])).resolve()
+            if path.resolve() != expected_path:
+                raise ValueError(f"Snapshot path mismatch for {dataset_id}")
+            if path.stat().st_size != int(entry["size_bytes"]):
+                raise ValueError(f"Snapshot size mismatch for {dataset_id}")
+            if _sha256(path) != str(entry["sha256"]):
+                raise ValueError(f"Snapshot SHA-256 mismatch for {dataset_id}")
+            dataset_participants = result.pop("participants")
+            if not isinstance(dataset_participants, set):
+                raise ValueError(f"Invalid participant summary for {dataset_id}")
+            if "participants" in entry and len(dataset_participants) != int(
+                entry["participants"]
+            ):
+                raise ValueError(f"Participant count mismatch for {dataset_id}")
+            for field in (
+                "sequences",
+                "rows",
+                "annotations",
+                "logical_content_sha256",
+                "evaluation_role",
+            ):
+                if result[field] != entry[field]:
+                    raise ValueError(f"Snapshot {field} mismatch for {dataset_id}")
+            for field in (
+                "events",
+                "segments",
+                "fall_sequences",
+                "supervision",
+                "body_locations",
+            ):
+                if field in entry and result[field] != entry[field]:
+                    raise ValueError(f"Snapshot {field} mismatch for {dataset_id}")
+            if result["evaluation_role"] != expected_role:
+                raise ValueError(f"Unexpected evaluation role for {dataset_id}")
+            participants.update((dataset_id, value) for value in dataset_participants)
+            for name in totals:
+                totals[name] += int(result[name])
+            datasets.append(result)
+            task.update(advance=1)
     return totals, participants, datasets
 
 
@@ -412,7 +431,9 @@ def validate_data(
     *,
     contract_path: Path = DEFAULT_CONTRACT_PATH,
     snapshot_path: Path | None = None,
+    progress: ProgressReporter | None = None,
 ) -> dict[str, object]:
+    reporter = progress or NullProgressReporter()
     active_path = default_active_snapshot_path() if snapshot_path is None else snapshot_path
     contract, snapshot, contract_sha256, snapshot_sha256 = load_contract_snapshot(
         project_root, contract_path=contract_path, snapshot_path=active_path
@@ -427,6 +448,8 @@ def validate_data(
         active_path.parent,
         base_collection,
         "cross_validation",
+        reporter,
+        "base",
     )
     base_split = _check_splits(
         project_root,
@@ -442,6 +465,8 @@ def validate_data(
             active_path.parent,
             team_collection,
             "training_only",
+            reporter,
+            "team",
         )
         team_summary = {
             "files": len(team_datasets),
