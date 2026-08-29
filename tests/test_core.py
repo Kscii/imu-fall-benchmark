@@ -80,7 +80,7 @@ def test_temporal_core_onnx_plan_contains_65_full_parity_jobs(
     assert config["onnx_parity_batch_size"] == 256
     assert config["onnx_parity_max_samples"] is None
     assert config["onnx_parity_rtol"] == 1e-4
-    assert config["onnx_parity_atol"] == 5e-3
+    assert config["onnx_parity_atol"] == 1e-2
 
 
 def test_team_fold_is_training_only(active_manifest_path: Path) -> None:

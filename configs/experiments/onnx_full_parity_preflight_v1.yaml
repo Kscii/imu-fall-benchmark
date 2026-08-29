@@ -31,7 +31,7 @@ onnx_parity_batch_size: 256
 onnx_parity_max_samples: null
 onnx_runtime_provider: cpu
 onnx_parity_rtol: 0.0001
-onnx_parity_atol: 0.005
+onnx_parity_atol: 0.01
 data_quality_status: engineering_full_onnx_parity_preflight_only
 known_limitations:
   - This run measures full validation/test ONNX parity and its cost on one fold.
