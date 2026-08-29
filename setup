@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/benchmark-shell-lib.sh
+source "${REPO_ROOT}/scripts/benchmark-shell-lib.sh"
+
+TOTAL_STAGES=8
+CURRENT_STAGE=0
+STAGE_STARTED=0
+
+usage() {
+  cat <<'EOF'
+Usage: ./setup
+
+Install or reuse the pinned WSL2/CUDA environment, then register the user-level
+`imu-bench` command. The script does not modify system Python or shell profiles.
+EOF
+}
+
+stage() {
+  CURRENT_STAGE=$((CURRENT_STAGE + 1))
+  STAGE_STARTED="$(date +%s)"
+  printf '\n[%d/%d] %s\n' "${CURRENT_STAGE}" "${TOTAL_STAGES}" "$1"
+  if [[ -n "${2:-}" ]]; then
+    printf '        Expected: %s\n' "$2"
+  fi
+}
+
+stage_done() {
+  local now
+  now="$(date +%s)"
+  printf '        Completed in %ds\n' "$((now - STAGE_STARTED))"
+}
+
+require_download_tools() {
+  command -v curl >/dev/null || {
+    echo "ERROR: curl is required. Install: sudo apt install --yes curl ca-certificates" >&2
+    exit 1
+  }
+  command -v tar >/dev/null || {
+    echo "ERROR: tar is required. Install: sudo apt install --yes tar" >&2
+    exit 1
+  }
+}
+
+install_miniforge() {
+  local destination installer temporary
+  destination="${WORK_ROOT}/toolchains/miniforge-${MINIFORGE_VERSION}"
+  if [[ -x "${destination}/bin/conda" ]]; then
+    echo "        Reusing ${destination}"
+    return
+  fi
+  if [[ -e "${destination}" ]]; then
+    echo "ERROR: incomplete Miniforge installation found: ${destination}" >&2
+    echo "       Move it aside, then rerun ./setup." >&2
+    return 1
+  fi
+  require_download_tools
+  temporary="$(mktemp -d)"
+  installer="${temporary}/Miniforge3.sh"
+  trap 'rm -rf -- "${temporary}"' RETURN
+  curl --fail --location --retry 3 --progress-bar --output "${installer}" "${MINIFORGE_URL}"
+  printf '%s  %s\n' "${MINIFORGE_SHA256}" "${installer}" | sha256sum --check --status
+  mkdir -p -- "$(dirname -- "${destination}")"
+  bash "${installer}" -b -p "${destination}"
+  trap - RETURN
+  rm -rf -- "${temporary}"
+}
+
+install_gcloud() {
+  local destination archive temporary
+  destination="${WORK_ROOT}/toolchains/google-cloud-sdk-${GCLOUD_VERSION}"
+  if [[ -x "${destination}/bin/gcloud" ]]; then
+    echo "        Reusing ${destination}"
+    return
+  fi
+  if [[ -e "${destination}" ]]; then
+    echo "ERROR: incomplete Google Cloud CLI installation found: ${destination}" >&2
+    echo "       Move it aside, then rerun ./setup." >&2
+    return 1
+  fi
+  require_download_tools
+  temporary="$(mktemp -d)"
+  archive="${temporary}/gcloud.tar.gz"
+  trap 'rm -rf -- "${temporary}"' RETURN
+  curl --fail --location --retry 3 --progress-bar --output "${archive}" "${GCLOUD_URL}"
+  printf '%s  %s\n' "${GCLOUD_SHA256}" "${archive}" | sha256sum --check --status
+  tar -xzf "${archive}" -C "${temporary}"
+  mkdir -p -- "$(dirname -- "${destination}")"
+  mv -- "${temporary}/google-cloud-sdk" "${destination}"
+  trap - RETURN
+  rm -rf -- "${temporary}"
+}
+
+adopt_legacy_environment() {
+  local canonical legacy temporary_link
+  canonical="$(canonical_environment_path)"
+  [[ -e "${canonical}" || -L "${canonical}" ]] && return
+  legacy="$(find_compatible_legacy_environment)" || return
+  temporary_link="${canonical}.tmp-$$"
+  ln -s -- "${legacy}" "${temporary_link}"
+  mv -T -- "${temporary_link}" "${canonical}"
+  printf '        Registered compatible legacy environment: %s\n' "${legacy}"
+}
+
+verify_environment() {
+  local env_path=$1 python_exe
+  python_exe="${env_path}/bin/python"
+  "${python_exe}" -c '
+import importlib.metadata as metadata
+import torch
+import xgboost
+
+assert torch.__version__ == "2.8.0+cu129", torch.__version__
+assert torch.version.cuda == "12.9", torch.version.cuda
+assert xgboost.__version__ == "3.4.0", xgboost.__version__
+assert metadata.version("rich") == "15.0.0", metadata.version("rich")
+'
+}
+
+torch_layer_is_ready() {
+  local env_path=$1
+  "${env_path}/bin/python" -c '
+import torch
+
+assert torch.__version__ == "2.8.0+cu129", torch.__version__
+assert torch.version.cuda == "12.9", torch.version.cuda
+' >/dev/null 2>&1
+}
+
+write_install_state() {
+  local env_path=$1 conda_exe=$2 gcloud_exe=$3 python_exe
+  python_exe="${env_path}/bin/python"
+  "${python_exe}" -c '
+import json
+import os
+import pathlib
+import sys
+import time
+
+destination = pathlib.Path(sys.argv[1])
+payload = {
+    "schema_version": "imu_benchmark_install_v1",
+    "repository_root": sys.argv[2],
+    "environment_path": sys.argv[3],
+    "environment_digest": sys.argv[4],
+    "application_digest": sys.argv[5],
+    "conda_executable": sys.argv[6],
+    "gcloud_executable": sys.argv[7],
+    "updated_at_unix": int(time.time()),
+}
+destination.parent.mkdir(parents=True, exist_ok=True)
+temporary = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
+temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+os.replace(temporary, destination)
+' "${WORK_ROOT}/install.json" "${REPO_ROOT}" "${env_path}" "$(dependency_digest)" \
+    "$(application_digest)" "${conda_exe}" "${gcloud_exe}"
+}
+
+register_launcher() {
+  local destination temporary target
+  destination="${HOME}/.local/bin/imu-bench"
+  target="$(readlink -f -- "${REPO_ROOT}/imu-bench")"
+  mkdir -p -- "$(dirname -- "${destination}")"
+  if [[ -e "${destination}" && ! -L "${destination}" ]]; then
+    echo "ERROR: refusing to overwrite non-symlink launcher: ${destination}" >&2
+    return 1
+  fi
+  temporary="${destination}.tmp-$$"
+  ln -s -- "${target}" "${temporary}"
+  mv -Tf -- "${temporary}" "${destination}"
+  printf '        Registered %s -> %s\n' "${destination}" "${target}"
+}
+
+main() {
+  if (( $# )) && [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    usage
+    exit 0
+  fi
+  if (( $# )); then
+    echo "ERROR: setup does not accept arguments." >&2
+    exit 2
+  fi
+
+  stage "Checking WSL2, CUDA, disk space, and required tools"
+  require_wsl2
+  require_absolute_work_root
+  command -v git >/dev/null || {
+    echo "ERROR: git is required. Install: sudo apt install --yes git" >&2
+    exit 1
+  }
+  command -v sha256sum >/dev/null || {
+    echo "ERROR: sha256sum is required (package: coreutils)." >&2
+    exit 1
+  }
+  if ! command -v nvidia-smi >/dev/null && [[ ! -x /usr/lib/wsl/lib/nvidia-smi ]]; then
+    echo "ERROR: nvidia-smi is unavailable inside WSL2." >&2
+    exit 1
+  fi
+  mkdir -p -- "${WORK_ROOT}/envs" "${WORK_ROOT}/data" "${WORK_ROOT}/cache" \
+    "${WORK_ROOT}/runs" "${WORK_ROOT}/toolchains"
+  stage_done
+
+  stage "Installing or reusing pinned Miniforge" "1-3 min when downloading"
+  install_miniforge
+  local conda_exe
+  conda_exe="$(find_conda)"
+  stage_done
+
+  stage "Installing or reusing pinned Google Cloud CLI" "1-3 min when downloading"
+  install_gcloud
+  local gcloud_exe
+  gcloud_exe="$(find_gcloud)"
+  stage_done
+
+  stage "Resolving the content-addressed CUDA environment"
+  adopt_legacy_environment
+  local canonical env_path free_kib marker
+  canonical="$(canonical_environment_path)"
+  marker="${canonical}/.imu-benchmark-complete-v3"
+  if [[ ! -e "${canonical}" ]]; then
+    free_kib="$(df -Pk "${WORK_ROOT}" | awk 'NR == 2 {print $4}')"
+    if (( free_kib < MIN_FREE_KIB )); then
+      echo "ERROR: at least 25 GiB free space is required for a fresh CUDA environment." >&2
+      exit 1
+    fi
+    echo "        New environment: ${canonical}"
+  else
+    echo "        Reusing environment mapping: ${canonical}"
+  fi
+  stage_done
+
+  stage "Creating the Conda/RAPIDS base environment" "5-20 min on first use"
+  if [[ ! -e "${canonical}" ]]; then
+    "${conda_exe}" env create --prefix "${canonical}" --file "${REPO_ROOT}/environment.yml"
+  else
+    echo "        Base environment already exists"
+  fi
+  env_path="$(readlink -f -- "${canonical}")"
+  if [[ ! -x "${env_path}/bin/python" ]]; then
+    echo "ERROR: incomplete Conda environment found: ${env_path}" >&2
+    echo "       Move it aside, then rerun ./setup." >&2
+    exit 1
+  fi
+  stage_done
+
+  stage "Installing the pinned PyTorch CUDA runtime" "3-15 min on first use"
+  if torch_layer_is_ready "${env_path}"; then
+    echo "        Compatible PyTorch layer already installed"
+  else
+    "${conda_exe}" run --prefix "${env_path}" \
+      python -m pip install --requirement "${REPO_ROOT}/requirements-torch-cu129.txt"
+  fi
+  stage_done
+
+  stage "Installing XGBoost and the Rich CLI layer" "usually under 2 min"
+  if [[ ! -f "${marker}" || ! -f "${env_path}/.imu-benchmark-app-$(application_digest)" ]]; then
+    "${conda_exe}" run --prefix "${env_path}" \
+      python -m pip install --requirement "${REPO_ROOT}/requirements-runtime.txt"
+    verify_environment "${env_path}"
+    printf '%s\n' "$(dependency_digest)" >"$(environment_marker "${env_path}")"
+    printf '%s\n' "$(application_digest)" >"${env_path}/.imu-benchmark-app-$(application_digest)"
+  else
+    echo "        Runtime layer already verified"
+  fi
+  stage_done
+
+  stage "Registering the imu-bench command and installation state"
+  register_launcher
+  write_install_state "${env_path}" "${conda_exe}" "${gcloud_exe}"
+  stage_done
+
+  printf '\nEnvironment ready: %s\nWork root: %s\n' "${env_path}" "${WORK_ROOT}"
+  case ":${PATH}:" in
+    *":${HOME}/.local/bin:"*)
+      echo "Next: imu-bench data pull"
+      ;;
+    *)
+      # Print a literal command that the user can copy into the current shell.
+      # shellcheck disable=SC2016
+      printf 'Run once in this terminal:\n  export PATH="$HOME/.local/bin:$PATH"\n'
+      echo "Then run: imu-bench data pull"
+      ;;
+  esac
+}
+
+main "$@"

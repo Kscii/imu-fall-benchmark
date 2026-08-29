@@ -39,7 +39,7 @@ jobs:
         run: uv sync --frozen --dev
 
       - name: Check shell entry point
-        run: bash -n benchmark
+        run: bash -n setup imu-bench scripts/benchmark-shell-lib.sh
 
       - name: Run Ruff
         run: uv run ruff check src tests
