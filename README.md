@@ -197,9 +197,16 @@ imu-bench data activate-base \
 
 Routine users only run `data pull` and do not need bucket write access. Credentials, login caches, HDF5 files, run outputs, and the local `TODO.md` must never be committed to Git.
 
-## Immutable result publication
+## Immutable ONNX publication
 
-Maintainers may publish only a clean, complete 65-job temporal-core run that uses the exact `imu_25hz_snapshot_v2` snapshot and has PASS statistical outputs:
+Any team member on the server whitelist may publish one of the two controlled, clean
+`imu_25hz_snapshot_v2` experiment profiles through the constrained upload broker:
+
+- `formal_baseline_temporal_core_onnx_v1`: 65 jobs, five participant folds, complete
+  validation/test parity, and PASS statistical outputs;
+- `onnx_full_parity_preflight_v1`: seven fold-0 engineering jobs with complete
+  validation/test parity. This remains engineering evidence and is never presented as a
+  formal comparison.
 
 ```bash
 imu-bench results publish <run-id>
@@ -207,6 +214,34 @@ imu-bench results verify <run-id>
 imu-bench results pull <run-id>
 ```
 
-Each run is stored under `gs://soft3888-label/benchmark-results/temporal-core/<run-id>/` as a no-clobber `run.tar.gz`, a SHA-256 manifest, and directly readable report/summary files. The bundle contains native models, optional ONNX models, checkpoints, OOF scores, metrics, configuration, environment, and provenance. There is no mutable results `current` pointer.
+Formal and engineering runs are stored separately under
+`benchmark-results/temporal-core/<run-id>/` and
+`benchmark-results/engineering/<run-id>/`. The broker derives every permitted object key
+from the publication manifest, verifies size and SHA-256, then writes the manifest last.
+The annotation platform exposes the method-level mean and sample standard deviation,
+fold ONNX files, metadata, raw JSON, and the complete bundle. There is no mutable
+`current`, `recommended`, or `best` pointer.
+
+After a training method has been selected without using test-fold performance to choose
+one fold, publish a separately validated final runtime package:
+
+```bash
+imu-bench models publish /path/to/model-package
+imu-bench models verify <package-id>
+```
+
+The package directory must contain exactly `model.onnx`, `manifest.json`,
+`runtime_config.json`, `metrics.json`, `golden_input.npz`, `golden_output.npz`, and
+`checksums.sha256`. Publication requires ONNX checker PASS and Python ONNX Runtime golden
+parity PASS. Android/external-runtime and device replay may remain explicitly
+`not_tested`; they must never be implied by Python parity. Model output is `fall_score`,
+not a probability unless a separate probability calibration has been validated.
+
+Administrators can restore a deprecated publication with its observed state generation:
+
+```bash
+imu-bench results restore <run-id> --expected-generation <generation>
+imu-bench models restore <package-id> --expected-generation <generation>
+```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for collaboration rules.

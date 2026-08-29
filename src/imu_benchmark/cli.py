@@ -10,7 +10,17 @@ from pathlib import Path
 from typing import Any
 
 from .cloud_data import BASE_MANIFEST_PATH, activate_base, data_status, publish_base, pull_data
-from .cloud_results import publish_result, pull_result, verify_result
+from .cloud_models import (
+    publish_model_package,
+    restore_published_model_package,
+    verify_model_package,
+)
+from .cloud_results import (
+    publish_result,
+    pull_result,
+    restore_published_result,
+    verify_result,
+)
 from .configuration import load_experiment
 from .dataset import validate_data
 from .device import CudaUnavailable
@@ -208,6 +218,28 @@ def _parser() -> argparse.ArgumentParser:
     ):
         result_command = result_commands.add_parser(action, help=help_text)
         result_command.add_argument("run_id")
+    result_restore = result_commands.add_parser(
+        "restore", help="Admin-only restore of a deprecated result publication"
+    )
+    result_restore.add_argument("run_id")
+    result_restore.add_argument("--expected-generation", type=int, required=True)
+    models = commands.add_parser(
+        "models", help="Publish or verify immutable final ONNX model packages"
+    )
+    model_commands = models.add_subparsers(dest="models_command", required=True)
+    model_publish = model_commands.add_parser(
+        "publish", help="Validate and publish one final model package directory"
+    )
+    model_publish.add_argument("package_dir", type=Path)
+    model_verify = model_commands.add_parser(
+        "verify", help="Verify one published final model package"
+    )
+    model_verify.add_argument("package_id")
+    model_restore = model_commands.add_parser(
+        "restore", help="Admin-only restore of a deprecated final model package"
+    )
+    model_restore.add_argument("package_id")
+    model_restore.add_argument("--expected-generation", type=int, required=True)
     split = commands.add_parser("split", help="Propose sticky participant folds")
     split_commands = split.add_subparsers(dest="split_command", required=True)
     propose = split_commands.add_parser(
@@ -285,7 +317,21 @@ def _dispatch(args: argparse.Namespace, reporter: ProgressReporter) -> dict[str,
             return pull_result(paths.runs, args.run_id, progress=reporter)
         if args.results_command == "verify":
             return verify_result(paths.runs, args.run_id, progress=reporter)
+        if args.results_command == "restore":
+            return restore_published_result(
+                args.run_id, expected_generation=args.expected_generation
+            )
         raise AssertionError(f"Unhandled results command: {args.results_command}")
+    if args.command == "models":
+        if args.models_command == "publish":
+            return publish_model_package(args.package_dir, progress=reporter)
+        if args.models_command == "verify":
+            return verify_model_package(args.package_id)
+        if args.models_command == "restore":
+            return restore_published_model_package(
+                args.package_id, expected_generation=args.expected_generation
+            )
+        raise AssertionError(f"Unhandled models command: {args.models_command}")
     if args.command == "split":
         if args.split_command == "propose":
             output_dir = (
