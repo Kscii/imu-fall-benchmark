@@ -18,6 +18,7 @@ from .contract import (
     validate_snapshot_shape,
 )
 from .dataset import validate_hdf5_file
+from .progress import NullProgressReporter, ProgressReporter
 
 DEFAULT_BUCKET = "gs://soft3888-label"
 BENCHMARK_PREFIX = "benchmark-datasets"
@@ -40,7 +41,7 @@ def _run_gcloud(
     capture_output: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     if shutil.which("gcloud") is None:
-        raise RuntimeError("Google Cloud CLI is missing; run ./benchmark setup")
+        raise RuntimeError("Google Cloud CLI is missing; run ./setup")
     try:
         return subprocess.run(
             ("gcloud", *arguments),
@@ -65,7 +66,7 @@ def ensure_gcloud_login(*, interactive: bool) -> str:
         if not sys.stdin.isatty():
             raise RuntimeError(
                 "No active gcloud account in WSL2. Open an interactive WSL terminal "
-                "and run ./benchmark data pull once to complete Google sign-in."
+                "and run imu-bench data pull once to complete Google sign-in."
             )
         _run_gcloud("auth", "login", capture_output=False)
         return ensure_gcloud_login(interactive=False)
@@ -242,14 +243,22 @@ def _install_snapshot(
     *,
     kind: str,
     manifest: dict[str, Any],
+    progress: ProgressReporter,
 ) -> tuple[str, list[dict[str, Any]]]:
     snapshot_id = str(manifest["snapshot_id"])
     parent = data_root / kind
     final = parent / snapshot_id
     datasets = final / "datasets"
     if final.exists():
-        for entry in manifest["files"]:
-            _validate_local_file(datasets / str(entry["filename"]), entry)
+        with progress.task(
+            f"Validating cached {kind} snapshot",
+            total=len(manifest["files"]),
+            unit="files",
+        ) as task:
+            for entry in manifest["files"]:
+                task.update(detail=str(entry["filename"]))
+                _validate_local_file(datasets / str(entry["filename"]), entry)
+                task.update(advance=1)
     else:
         parent.mkdir(parents=True, exist_ok=True)
         staging = parent / f".{snapshot_id}.partial-{os.getpid()}"
@@ -258,15 +267,23 @@ def _install_snapshot(
         staging_datasets = staging / "datasets"
         staging_datasets.mkdir(parents=True)
         try:
-            for entry in manifest["files"]:
-                destination = staging_datasets / str(entry["filename"])
-                _run_gcloud(
-                    "storage",
-                    "cp",
-                    _object_uri(bucket, str(entry["object_key"])),
-                    str(destination),
-                )
-                _validate_local_file(destination, entry)
+            total_bytes = sum(int(entry["size_bytes"]) for entry in manifest["files"])
+            with progress.task(
+                f"Downloading and validating {kind} snapshot",
+                total=total_bytes,
+                unit="bytes",
+            ) as task:
+                for entry in manifest["files"]:
+                    destination = staging_datasets / str(entry["filename"])
+                    task.update(detail=str(entry["filename"]))
+                    _run_gcloud(
+                        "storage",
+                        "cp",
+                        _object_uri(bucket, str(entry["object_key"])),
+                        str(destination),
+                    )
+                    _validate_local_file(destination, entry)
+                    task.update(advance=int(entry["size_bytes"]))
             (staging / "manifest.json").write_bytes(_json_bytes(manifest))
             os.replace(staging, final)
         except BaseException:
@@ -296,15 +313,23 @@ def _load_splits(project_root: Path) -> list[dict[str, Any]]:
     return splits
 
 
-def pull_data(project_root: Path, data_root: Path) -> dict[str, Any]:
-    account = ensure_gcloud_login(interactive=True)
+def pull_data(
+    project_root: Path,
+    data_root: Path,
+    *,
+    progress: ProgressReporter | None = None,
+) -> dict[str, Any]:
+    reporter = progress or NullProgressReporter()
+    with reporter.task("Checking Google Cloud sign-in"):
+        account = ensure_gcloud_login(interactive=True)
     bucket = data_bucket()
-    base_remote = _remote_snapshot(
-        bucket,
-        kind="base",
-        current_object=f"{BENCHMARK_PREFIX}/base/current.json",
-        optional=False,
-    )
+    with reporter.task("Resolving immutable snapshot manifests"):
+        base_remote = _remote_snapshot(
+            bucket,
+            kind="base",
+            current_object=f"{BENCHMARK_PREFIX}/base/current.json",
+            optional=False,
+        )
     assert base_remote is not None
     base_current, base_manifest = base_remote
     base_path, base_entries = _install_snapshot(
@@ -312,13 +337,15 @@ def pull_data(project_root: Path, data_root: Path) -> dict[str, Any]:
         bucket,
         kind="base",
         manifest=base_manifest,
+        progress=reporter,
     )
-    team_remote = _remote_snapshot(
-        bucket,
-        kind="team",
-        current_object=f"{BENCHMARK_PREFIX}/team/cw12eu/current.json",
-        optional=True,
-    )
+    with reporter.task("Checking the optional team snapshot"):
+        team_remote = _remote_snapshot(
+            bucket,
+            kind="team",
+            current_object=f"{BENCHMARK_PREFIX}/team/cw12eu/current.json",
+            optional=True,
+        )
     collections: dict[str, Any] = {
         "base": {
             "data_path": base_path,
@@ -335,6 +362,7 @@ def pull_data(project_root: Path, data_root: Path) -> dict[str, Any]:
             bucket,
             kind="team",
             manifest=team_manifest,
+            progress=reporter,
         )
         collections["team"] = {
             "data_path": team_path,
@@ -383,22 +411,29 @@ def pull_data(project_root: Path, data_root: Path) -> dict[str, Any]:
     }
 
 
-def data_status(project_root: Path, data_root: Path) -> dict[str, Any]:
-    account = ensure_gcloud_login(interactive=False)
-    bucket = data_bucket()
-    base = _remote_snapshot(
-        bucket,
-        kind="base",
-        current_object=f"{BENCHMARK_PREFIX}/base/current.json",
-        optional=False,
-    )
-    assert base is not None
-    team = _remote_snapshot(
-        bucket,
-        kind="team",
-        current_object=f"{BENCHMARK_PREFIX}/team/cw12eu/current.json",
-        optional=True,
-    )
+def data_status(
+    project_root: Path,
+    data_root: Path,
+    *,
+    progress: ProgressReporter | None = None,
+) -> dict[str, Any]:
+    reporter = progress or NullProgressReporter()
+    with reporter.task("Checking Google Cloud snapshots"):
+        account = ensure_gcloud_login(interactive=False)
+        bucket = data_bucket()
+        base = _remote_snapshot(
+            bucket,
+            kind="base",
+            current_object=f"{BENCHMARK_PREFIX}/base/current.json",
+            optional=False,
+        )
+        assert base is not None
+        team = _remote_snapshot(
+            bucket,
+            kind="team",
+            current_object=f"{BENCHMARK_PREFIX}/team/cw12eu/current.json",
+            optional=True,
+        )
     active_path = data_root / "active.json"
     active = (
         _read_json_bytes(active_path.read_bytes(), source=str(active_path))
@@ -428,21 +463,35 @@ def _upload_file(source: Path, uri: str, *, immutable: bool) -> None:
     _run_gcloud(*arguments)
 
 
-def publish_base(project_root: Path, source_dir: Path) -> dict[str, Any]:
-    account = ensure_gcloud_login(interactive=True)
+def publish_base(
+    project_root: Path,
+    source_dir: Path,
+    *,
+    progress: ProgressReporter | None = None,
+) -> dict[str, Any]:
+    reporter = progress or NullProgressReporter()
+    with reporter.task("Checking Google Cloud sign-in"):
+        account = ensure_gcloud_login(interactive=True)
     bucket = data_bucket()
     manifest_path = project_root / BASE_MANIFEST_PATH
     manifest_bytes = manifest_path.read_bytes()
     manifest = _read_json_bytes(manifest_bytes, source=str(manifest_path))
     _validate_remote_manifest(manifest, expected_kind="base")
-    for entry in manifest["files"]:
-        source = source_dir / str(entry["filename"])
-        _validate_local_file(source, entry)
-        _upload_file(
-            source,
-            _object_uri(bucket, str(entry["object_key"])),
-            immutable=True,
-        )
+    with reporter.task(
+        "Validating and publishing the base snapshot",
+        total=len(manifest["files"]),
+        unit="files",
+    ) as task:
+        for entry in manifest["files"]:
+            source = source_dir / str(entry["filename"])
+            task.update(detail=source.name)
+            _validate_local_file(source, entry)
+            _upload_file(
+                source,
+                _object_uri(bucket, str(entry["object_key"])),
+                immutable=True,
+            )
+            task.update(advance=1)
     manifest_object = (
         f"{BENCHMARK_PREFIX}/base/{manifest['snapshot_id']}/manifest.json"
     )

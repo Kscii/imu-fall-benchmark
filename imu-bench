@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+REPO_ROOT="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd)"
+# shellcheck source=scripts/benchmark-shell-lib.sh
+source "${REPO_ROOT}/scripts/benchmark-shell-lib.sh"
+
+require_wsl2
+require_absolute_work_root
+
+conda_exe="$(find_conda)"
+gcloud_exe="$(find_gcloud)"
+if [[ ! -x "${conda_exe}" ]]; then
+  echo "ERROR: the pinned Conda toolchain is missing; run ./setup from the registered checkout." >&2
+  exit 1
+fi
+if [[ ! -x "${gcloud_exe}" ]]; then
+  echo "ERROR: the pinned Google Cloud CLI is missing; run ./setup from the registered checkout." >&2
+  exit 1
+fi
+if ! env_path="$(resolved_environment_path)"; then
+  echo "ERROR: the project environment is missing; run ./setup from the registered checkout." >&2
+  exit 1
+fi
+marker="$(environment_marker "${env_path}")"
+if [[ ! -f "${marker}" || "$(tr -d '\r\n' <"${marker}")" != "$(dependency_digest)" ]]; then
+  echo "ERROR: project dependencies changed; rerun ./setup from the registered checkout." >&2
+  exit 1
+fi
+
+if [[ -d /usr/lib/wsl/lib ]]; then
+  export PATH="/usr/lib/wsl/lib:${PATH}"
+fi
+export CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=1
+PATH="$(dirname -- "${gcloud_exe}"):${PATH}" PYTHONPATH="${REPO_ROOT}/src" \
+  "${conda_exe}" run --no-capture-output --prefix "${env_path}" \
+  python -m imu_benchmark.cli "$@"

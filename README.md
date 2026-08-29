@@ -35,25 +35,27 @@ mkdir -p ~/projects
 cd ~/projects
 git clone https://github.com/Kscii/imu-fall-benchmark.git
 cd ~/projects/imu-fall-benchmark
-./benchmark setup
-./benchmark data pull
-./benchmark doctor
-./benchmark smoke
+./setup
+imu-bench data pull
+imu-bench doctor
+imu-bench smoke
 ```
 
-`setup` installs or reuses pinned Miniforge, Google Cloud CLI, and CUDA Python environments under `~/imu-fall-work`. It does not modify the system Python installation. A first installation normally takes 20–60 minutes and should have at least 25 GiB of free disk space.
+`./setup` is the only command launched through Bash. It installs or reuses pinned Miniforge, Google Cloud CLI, and CUDA Python environments under `~/imu-fall-work`, then registers `imu-bench` at `~/.local/bin/imu-bench`. It does not modify the system Python installation or shell profile. If `~/.local/bin` is not already on `PATH`, the script prints one `export` command for the current terminal. A first installation normally takes 20–60 minutes and should have at least 25 GiB of free disk space.
 
-The first `data pull` asks the user to sign in to Google. It downloads only the immutable snapshot referenced by `current.json`, then checks each file's SHA-256, HDF5 v3.1 structure, logical fingerprint, and statistics. Git LFS is not required. Each WSL user signs in only once: the first command must be run directly in an interactive WSL terminal. If WSL cannot open a browser and reports a `gio` error, open the displayed URL in a Windows browser and complete the login there. Non-interactive SSH or Codex automation neither copies host credentials nor continues when authentication requires input. Later pulls can run automatically after sign-in.
+Running `./setup` from another checkout intentionally makes that checkout the active `imu-bench` source. Dependency environments are keyed by file contents, so compatible checkouts share the large CUDA environment even when their paths differ.
+
+The first `data pull` asks the user to sign in to Google. It downloads only the immutable snapshot referenced by `current.json`, then checks each file's SHA-256, HDF5 v3.1 structure, logical fingerprint, and statistics. Git LFS is not required. Each WSL user signs in only once: the first command must be run directly in an interactive WSL terminal. If WSL cannot open a browser and reports a `gio` error, open the displayed URL in a Windows browser and complete the login there. The URL printed after `gio:` is the same OAuth request repeated by the failed Linux browser opener, not a second login link. Non-interactive SSH or Codex automation neither copies host credentials nor continues when authentication requires input. Later pulls can run automatically after sign-in.
 
 ## Routine commands
 
 ```bash
-./benchmark data status
-./benchmark data pull
-./benchmark validate-data
-./benchmark test
-./benchmark doctor
-./benchmark smoke
+imu-bench data status
+imu-bench data pull
+imu-bench validate-data
+imu-bench test
+imu-bench doctor
+imu-bench smoke
 ```
 
 - `data status`: compare the active local manifest with the remote current pointer;
@@ -62,6 +64,14 @@ The first `data pull` asks the user to sign in to Google. It downloads only the 
 - `test`: run Ruff and pytest;
 - `doctor`: verify WSL2, CUDA, the GPU, and all seven model backends;
 - `smoke`: run a bounded fold-0, seven-model end-to-end check with compatible checkpoint reuse.
+
+Interactive terminals use Rich progress bars. Redirected output and CI use stable line-oriented progress instead. Override this with `--progress auto|plain|off`; the flag may appear before or after the command. Progress and diagnostics always use stderr. Normal stdout is a compact human-readable summary. Use `--json` for the complete machine-readable payload, for example:
+
+```bash
+imu-bench data pull --progress plain
+imu-bench smoke --json --progress off > smoke-result.json
+imu-bench --version
+```
 
 ## Data contract
 
@@ -104,8 +114,8 @@ Three entry points are currently retained:
 Inspect a plan before running it:
 
 ```bash
-./benchmark plan configs/experiments/all_temporal_fold0_pilot_v1.yaml
-./benchmark run configs/experiments/all_temporal_fold0_pilot_v1.yaml --resume
+imu-bench plan configs/experiments/all_temporal_fold0_pilot_v1.yaml
+imu-bench run configs/experiments/all_temporal_fold0_pilot_v1.yaml --resume
 ```
 
 The seven models are Threshold Impact, cuML Logistic Regression, cuML Random Forest, CUDA XGBoost, PyTorch 1D CNN, PyTorch LSTM, and PyTorch CNN-LSTM. The three tabular models consume 158 engineered features; the three deep sequence models consume raw `50 x 6` windows; Threshold Impact reads the raw window directly.
@@ -146,7 +156,7 @@ benchmark-datasets/
 `benchmark-datasets/` is a GCS managed folder. Team read-only IAM should be bound only to this resource, not to the entire bucket. Snapshot objects are immutable; `current.json` is a small, explicit pointer. Publishing the public base is a maintainer operation:
 
 ```bash
-./benchmark data publish-base --source-dir /path/to/reviewed/imu_25hz
+imu-bench data publish-base --source-dir /path/to/reviewed/imu_25hz
 ```
 
 Routine users only run `data pull` and do not need bucket write access. Credentials, login caches, HDF5 files, run outputs, and the local `TODO.md` must never be committed to Git.

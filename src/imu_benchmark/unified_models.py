@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -100,6 +101,7 @@ class CudaSequenceTrainer:
         random_seed: int,
         precision: str,
         execution_mode: str,
+        epoch_callback: Callable[[int, int, float, int], None] | None = None,
     ) -> None:
         if precision not in {"fp32", "bf16"}:
             raise ValueError(f"Unsupported PyTorch precision: {precision}")
@@ -113,6 +115,7 @@ class CudaSequenceTrainer:
         self.random_seed = random_seed
         self.precision = precision
         self.execution_mode = execution_mode
+        self.epoch_callback = epoch_callback
         self.model: Any | None = None
         self.best_epoch: int | None = None
 
@@ -236,6 +239,8 @@ class CudaSequenceTrainer:
                 )
             )
             best_loss, remaining, state = self._best(validation_loss, epoch, best_loss, remaining)
+            if self.epoch_callback is not None:
+                self.epoch_callback(epoch, self.max_epochs, validation_loss, remaining)
             if state is not None:
                 best_state = state
             if remaining <= 0:
@@ -313,6 +318,8 @@ class CudaSequenceTrainer:
                 )
             )
             best_loss, remaining, state = self._best(validation_loss, epoch, best_loss, remaining)
+            if self.epoch_callback is not None:
+                self.epoch_callback(epoch, self.max_epochs, validation_loss, remaining)
             if state is not None:
                 best_state = state
             if remaining <= 0:

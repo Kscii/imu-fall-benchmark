@@ -28,6 +28,7 @@ from .performance import (
     process_delta,
     process_snapshot,
 )
+from .progress import NullProgressReporter, ProgressReporter
 from .sequence_models import threshold_impact_scores
 from .unified_models import (
     CudaSequenceTrainer,
@@ -363,6 +364,7 @@ def _model_scores(
     job: Job,
     phases: PhaseTimer,
     prepared_cache: dict[tuple[Any, ...], dict[str, Any]],
+    progress: ProgressReporter,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     spec = config["model_catalog"]["models"][job.model_id]
     params = dict(spec["params"])
@@ -459,23 +461,40 @@ def _model_scores(
             return adapter, validation_scores, test_scores, external_scores
         if job.model_id not in SEQUENCE_MODELS:
             raise ValueError(f"Unsupported public model: {job.model_id}")
-        trainer = CudaSequenceTrainer(
-            job.model_id,
-            params,
-            max_epochs=int(config["max_epochs"]),
-            patience=int(config["patience"]),
-            top_fraction=float(config["contract"]["supervision"]["recording"]["mil_top_fraction"]),
-            random_seed=job.seed,
-            precision=job.precision,
-            execution_mode=effective_mode,
-        )
-        with phases.track("model_fit_seconds"):
-            trainer.fit_supervised(
-                train_values,
-                store.temporal_label[split.train],
-                validation_values,
-                store.temporal_label[split.validation],
+        maximum_epochs = int(config["max_epochs"])
+        with progress.task(
+            f"Training {job.model_id}",
+            total=maximum_epochs,
+            unit="epochs",
+        ) as epoch_task:
+
+            def on_epoch(epoch: int, maximum: int, loss: float, remaining: int) -> None:
+                del maximum
+                epoch_task.update(
+                    completed=epoch,
+                    detail=f"validation_loss={loss:.5f} patience={remaining}",
+                )
+
+            trainer = CudaSequenceTrainer(
+                job.model_id,
+                params,
+                max_epochs=maximum_epochs,
+                patience=int(config["patience"]),
+                top_fraction=float(
+                    config["contract"]["supervision"]["recording"]["mil_top_fraction"]
+                ),
+                random_seed=job.seed,
+                precision=job.precision,
+                execution_mode=effective_mode,
+                epoch_callback=on_epoch,
             )
+            with phases.track("model_fit_seconds"):
+                trainer.fit_supervised(
+                    train_values,
+                    store.temporal_label[split.train],
+                    validation_values,
+                    store.temporal_label[split.validation],
+                )
         with phases.track("validation_inference_seconds"):
             validation_scores = trainer.predict_proba(validation_values)
         with phases.track("test_inference_seconds"):
@@ -569,6 +588,7 @@ def _run_job(
     telemetry: NvidiaSmiMonitor,
     split_cache: dict[tuple[str, int, int], FoldIndices],
     prepared_cache: dict[tuple[Any, ...], dict[str, Any]],
+    progress: ProgressReporter,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     process_started = process_snapshot()
@@ -608,6 +628,7 @@ def _run_job(
             job=job,
             phases=phases,
             prepared_cache=prepared_cache,
+            progress=progress,
         )
         with phases.track("evaluation_seconds"):
             evaluation = _evaluate(
@@ -770,16 +791,22 @@ def run_experiment(
     environment: dict[str, Any],
     source: dict[str, Any],
     warnings: list[str],
+    progress: ProgressReporter | None = None,
 ) -> dict[str, Any]:
+    reporter = progress or NullProgressReporter()
     invocation_started = time.perf_counter()
     process_started = process_snapshot()
     phases = PhaseTimer()
     with phases.track("cache_prepare_seconds"):
         cache_path, cache_manifest = prepare_unified_window_store(
-            project_root=project_root, cache_root=cache_root, config=config
+            project_root=project_root,
+            cache_root=cache_root,
+            config=config,
+            progress=reporter,
         )
     with phases.track("store_metadata_load_seconds"):
-        store = load_unified_window_store(cache_path)
+        with reporter.task("Loading cached window metadata"):
+            store = load_unified_window_store(cache_path)
     run_id = _run_id(config, str(store.manifest["data_split_fingerprint"]))
     run_dir = runs_root / run_id
     event_path = run_dir / "events.jsonl"
@@ -803,8 +830,15 @@ def run_experiment(
         kinds.add("raw")
     arrays: dict[str, np.ndarray] = {}
     with phases.track("run_level_hdf5_materialization_seconds"):
-        for kind in sorted(kinds):
-            arrays[kind] = store.materialize(kind)
+        with reporter.task(
+            "Materializing run-level model inputs",
+            total=len(kinds),
+            unit="arrays",
+        ) as task:
+            for kind in sorted(kinds):
+                task.update(detail=kind)
+                arrays[kind] = store.materialize(kind)
+                task.update(advance=1)
     _event(event_path, "run_started", run_id=run_id, jobs=len(jobs), resume=resume)
     telemetry = NvidiaSmiMonitor().start()
     results: list[dict[str, Any]] = []
@@ -814,48 +848,45 @@ def run_experiment(
     started = time.perf_counter()
     try:
         with phases.track("job_execution_seconds"):
-            for position, job in enumerate(jobs, start=1):
-                _event(event_path, "job_started", job=asdict(job), position=position)
-                try:
-                    result = _run_job(
-                        store=store,
-                        arrays=arrays,
-                        config=config,
-                        job=job,
-                        run_dir=run_dir,
-                        resume=resume,
-                        telemetry=telemetry,
-                        split_cache=split_cache,
-                        prepared_cache=prepared_cache,
-                    )
-                except Exception as error:
-                    result = {
-                        "status": "failed",
-                        "reason": f"{type(error).__name__}: {error}",
-                        "job": asdict(job),
-                    }
-                if result["status"] in {"computed", "cached"}:
-                    results.append(result)
-                else:
-                    failures.append(result)
-                _event(
-                    event_path,
-                    "job_finished",
-                    job=asdict(job),
-                    status=result["status"],
-                    reason=result.get("reason"),
-                )
-                print(
-                    json.dumps(
-                        {
-                            "progress": f"{position}/{len(jobs)}",
-                            "job": job.key,
-                            "status": result["status"],
-                            "elapsed_seconds": round(time.perf_counter() - started, 1),
+            with reporter.task(
+                "Running benchmark jobs",
+                total=len(jobs),
+                unit="jobs",
+            ) as task:
+                for position, job in enumerate(jobs, start=1):
+                    task.update(detail=job.key)
+                    _event(event_path, "job_started", job=asdict(job), position=position)
+                    try:
+                        result = _run_job(
+                            store=store,
+                            arrays=arrays,
+                            config=config,
+                            job=job,
+                            run_dir=run_dir,
+                            resume=resume,
+                            telemetry=telemetry,
+                            split_cache=split_cache,
+                            prepared_cache=prepared_cache,
+                            progress=reporter,
+                        )
+                    except Exception as error:
+                        result = {
+                            "status": "failed",
+                            "reason": f"{type(error).__name__}: {error}",
+                            "job": asdict(job),
                         }
-                    ),
-                    flush=True,
-                )
+                    if result["status"] in {"computed", "cached"}:
+                        results.append(result)
+                    else:
+                        failures.append(result)
+                    _event(
+                        event_path,
+                        "job_finished",
+                        job=asdict(job),
+                        status=result["status"],
+                        reason=result.get("reason"),
+                    )
+                    task.update(advance=1, detail=f"{job.key}: {result['status']}")
     finally:
         telemetry.stop()
     completed_at = time.perf_counter()
@@ -884,7 +915,8 @@ def run_experiment(
         "job_execution_elapsed_seconds": completed_at - started,
     }
     with phases.track("report_generation_seconds"):
-        _write_report(run_dir, summary, results)
+        with reporter.task("Writing reports and result artefacts"):
+            _write_report(run_dir, summary, results)
     summary["elapsed_seconds"] = time.perf_counter() - invocation_started
     performance = build_performance_report(
         invocation_phases=phases.to_dict(),

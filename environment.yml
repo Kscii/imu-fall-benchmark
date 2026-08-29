@@ -14,5 +14,3 @@ dependencies:
   - pytest>=8.4,<9
   - ruff>=0.12,<1
   - pip
-  - pip:
-      - xgboost-cu12==3.4.0

@@ -9,9 +9,9 @@ This repository currently maintains only the WSL2/CUDA temporal sliding-window f
 Run inside WSL2:
 
 ```bash
-./benchmark test
-./benchmark validate-data
-./benchmark plan configs/experiments/temporal_smoke_v1.yaml
+imu-bench test
+imu-bench validate-data
+imu-bench plan configs/experiments/temporal_smoke_v1.yaml
 ```
 
 For pure Python or contract unit-test changes, another Linux development host may run:

@@ -16,6 +16,7 @@ from .configuration import canonical_sha256
 from .data import FEATURE_NAMES, extract_window_features
 from .dataset import IMURecording, iter_recordings
 from .performance import PhaseTimer
+from .progress import NullProgressReporter, ProgressReporter
 from .protocol import segment_decision_time_labels
 
 WINDOW_CACHE_SCHEMA = "unified_fall_windows_v4_25hz"
@@ -60,6 +61,30 @@ def _recording_collections(
                 if key not in assignments:
                     raise ValueError(f"Missing participant fold for {key}")
                 yield recording, assignments[key]
+
+
+def _recordings_with_progress(
+    recordings: Iterator[tuple[IMURecording, int]],
+    progress: ProgressReporter,
+    total: int,
+) -> Iterator[tuple[IMURecording, int]]:
+    with progress.task(
+        "Building the unified sliding-window cache",
+        total=total,
+        unit="sequences",
+    ) as task:
+        for recording, fold in recordings:
+            task.update(detail=f"{recording.dataset_id}/{recording.recording_id}")
+            yield recording, fold
+            task.update(advance=1)
+
+
+def _snapshot_sequence_count(snapshot: dict[str, Any]) -> int:
+    return sum(
+        int(dataset["sequences"])
+        for collection in snapshot["collections"].values()
+        for dataset in collection["datasets"]
+    )
 
 
 def _window_starts(
@@ -143,13 +168,20 @@ def _cache_fingerprint(config: dict[str, Any]) -> str:
 
 
 def prepare_unified_window_store(
-    *, project_root: Path, cache_root: Path, config: dict[str, Any]
+    *,
+    project_root: Path,
+    cache_root: Path,
+    config: dict[str, Any],
+    progress: ProgressReporter | None = None,
 ) -> tuple[Path, dict[str, Any]]:
+    reporter = progress or NullProgressReporter()
     fingerprint = _cache_fingerprint(config)
     destination = cache_root / "windows" / WINDOW_CACHE_SCHEMA / f"{fingerprint[:16]}.h5"
     if destination.exists():
-        with h5py.File(destination, "r") as handle:
-            manifest = json.loads(str(handle.attrs["manifest_json"]))
+        with reporter.task("Reusing the unified sliding-window cache", total=1) as task:
+            with h5py.File(destination, "r") as handle:
+                manifest = json.loads(str(handle.attrs["manifest_json"]))
+            task.update(advance=1)
         if manifest.get("data_split_fingerprint") != fingerprint:
             raise ValueError(f"Conflicting unified cache: {destination}")
         return destination, {**manifest, "cache_reused_this_invocation": True}
@@ -261,6 +293,11 @@ def prepare_unified_window_store(
                     Path(config["active_data_root"]),
                     config["snapshot"],
                 ),
+            )
+            recordings = _recordings_with_progress(
+                recordings,
+                reporter,
+                _snapshot_sequence_count(config["snapshot"]),
             )
             for recording, fold in recordings:
                 with phases.track("window_generation_seconds"):
