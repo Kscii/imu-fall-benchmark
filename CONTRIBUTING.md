@@ -13,6 +13,7 @@ imu-bench test
 imu-bench validate-data
 imu-bench plan configs/experiments/temporal_smoke_v1.yaml
 imu-bench run configs/experiments/onnx_preflight_v1.yaml --resume
+imu-bench run configs/experiments/onnx_full_parity_preflight_v1.yaml --resume
 imu-bench run configs/experiments/formal_pipeline_smoke_v1.yaml --resume
 ```
 
@@ -41,7 +42,7 @@ GitHub Actions runs only the shell syntax check, Ruff, and data-independent pyte
 
 ## Code rules
 
-- Keep the public CLI small. Prefer extending the existing `setup / data / doctor / test / smoke / plan / run / report` workflow.
+- Keep the public CLI small. Prefer extending the existing `setup / data / results / doctor / test / smoke / plan / run / report` workflow.
 - Store configurations under `configs/`; do not scatter protocol constants across command-line flags.
 - Use English for code identifiers, comments, and tracked documentation.
 - Write generated content to `IMU_BENCH_WORK_ROOT`, not into the repository.
@@ -49,4 +50,4 @@ GitHub Actions runs only the shell syntax check, Ruff, and data-independent pyte
 
 ## Reporting results
 
-A smoke run proves only that the workflow executes. ONNX preflight proves conversion and Python Runtime parity, not Android or model quality. Formal comparison requires a clean source, exact snapshot, frozen folds, seeds, recipes, alarm policies, retained OOF scores, and participant-level uncertainty analysis. Do not call `fall_score` a probability before completing a separate calibration process.
+A smoke run proves only that the workflow executes. ONNX preflight proves conversion and Python Runtime parity, not Android or model quality. Formal comparison requires a clean source, exact snapshot, frozen folds, seeds, recipes, alarm policies, retained OOF scores, and participant-level uncertainty analysis. Publish only complete immutable temporal-core runs; never overwrite an existing result object or use a mutable results pointer. Do not call `fall_score` a probability before completing a separate calibration process.

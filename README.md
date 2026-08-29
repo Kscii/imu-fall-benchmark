@@ -122,28 +122,31 @@ The retained engineering and formal entry points are:
 |---|---|
 | `temporal_smoke_v1.yaml` | Bounded end-to-end check; not model evidence |
 | `onnx_preflight_v1.yaml` | Seven-model ONNX opset-18 conversion and Python Runtime parity check |
+| `onnx_full_parity_preflight_v1.yaml` | One-fold timing gate over complete validation/test splits at batch 256 |
 | `formal_pipeline_smoke_v1.yaml` | Bounded check of both recipes, alarms, OOF shards, and statistics |
 | `formal_baseline_main_v1.yaml` | Main five-fold, five-seed public-data baseline; 265 jobs |
 | `formal_baseline_temporal_core_v1.yaml` | KFall + UNIVRFall single-seed ablation; 65 jobs |
+| `formal_baseline_temporal_core_onnx_v1.yaml` | Same 65 jobs with complete validation/test ONNX parity |
 
 Inspect a plan before running it:
 
 ```bash
 imu-bench run configs/experiments/onnx_preflight_v1.yaml --resume
+imu-bench run configs/experiments/onnx_full_parity_preflight_v1.yaml --resume
 imu-bench run configs/experiments/formal_pipeline_smoke_v1.yaml --resume
 imu-bench plan configs/experiments/formal_baseline_main_v1.yaml
 imu-bench plan configs/experiments/formal_baseline_temporal_core_v1.yaml
-imu-bench run configs/experiments/formal_baseline_main_v1.yaml --resume
-imu-bench run configs/experiments/formal_baseline_temporal_core_v1.yaml --resume
+imu-bench plan configs/experiments/formal_baseline_temporal_core_onnx_v1.yaml
+imu-bench run configs/experiments/formal_baseline_temporal_core_onnx_v1.yaml --resume
 ```
 
 The seven models are Threshold Impact, cuML Logistic Regression, cuML Random Forest, CUDA XGBoost, PyTorch 1D CNN, PyTorch LSTM, and PyTorch CNN-LSTM. The three tabular models consume 158 engineered features; the three deep sequence models consume raw `50 x 6` windows; Threshold Impact reads the raw window directly.
 
-The two formal configurations schedule 330 jobs in total. They compare natural sampling with participant/class-balanced sampling. The main run uses seeds `3888`, `5171`, `8438`, `12011`, and `17027`; deterministic Threshold and Logistic Regression jobs are not redundantly repeated across all seeds. Both formal runs use FP32, at most 100 epochs, patience 12, and 5,000 hierarchical bootstrap replicates.
+The current execution scope is the 65-job temporal-core experiment. The 265-job main configuration remains available but is not part of this run. Both compare natural sampling with participant/class-balanced sampling. Temporal-core uses seed `3888`, FP32, at most 100 epochs, patience 12, and 5,000 hierarchical bootstrap replicates. Deterministic Threshold jobs are not repeated across recipes.
 
 Formal configurations require a clean Git commit or immutable source snapshot. The source fingerprint, engine schema, resolved configuration, data snapshot, and split fingerprint all participate in run/checkpoint identity. Engineering smoke runs may use a local source copy but do not become formal evidence.
 
-ONNX export is deliberately split into two stages. The preflight proves that every current model type can be represented at opset 18 and matches Python ONNX Runtime for batch sizes 1, 7, and 256. The 330 cross-validation jobs retain native models and OOF scores without producing hundreds of deployment files. After validation-only model selection, at most three shortlisted model/recipe combinations will be refitted and packaged for Android in a separate iteration.
+ONNX export is deliberately split into two stages. The bounded preflight proves that every current model type can be represented at opset 18 and supports dynamic batches 1, 7, and 256. The full-parity preflight measures the cost of streaming complete validation and test splits through Python ONNX Runtime CPU at batch 256. If its projected 65-job overhead is at most 15 minutes, the ONNX temporal-core configuration exports every fold/recipe model and compares every score with an explicit `rtol=1e-4` and `atol=2e-3`. The absolute tolerance covers the measured FP32 recurrent-model conversion tail while `onnx_parity.csv` retains max, mean, and p99 error for every split. These cross-validation files are audit artefacts, not final Android packages. After later model selection, shortlisted combinations still require a separate fixed refit and Android Runtime validation.
 
 ## Outputs and recovery
 
@@ -160,7 +163,7 @@ Generated content is stored outside the repository by default:
 
 Set `IMU_BENCH_WORK_ROOT` to another absolute path if needed. Each completed job writes its checkpoint atomically. After an interruption, `--resume` reuses only results whose source, engine, configuration, data, split, and job fingerprints match exactly.
 
-Primary outputs include `resolved_config.yaml`, `environment.json`, `provenance.json`, `events.jsonl`, `jobs/*.npz`, native models under `models/`, `metrics.csv`, `event_metrics.csv`, `alarm_metrics.csv`, `subgroup_metrics.csv`, `performance.json`, and `report.md`. Formal runs also write `oof_manifest.json`, `participant_metrics.csv`, `aggregate_metrics.csv`, `paired_comparisons.csv`, and `statistical_manifest.json`.
+Primary outputs include `resolved_config.yaml`, `environment.json`, `provenance.json`, `events.jsonl`, `jobs/*.npz`, native models under `models/`, `metrics.csv`, `event_metrics.csv`, `alarm_metrics.csv`, `subgroup_metrics.csv`, `performance.json`, and `report.md`. Formal runs also write `oof_manifest.json`, `participant_metrics.csv`, `aggregate_metrics.csv`, `paired_comparisons.csv`, and `statistical_manifest.json`. ONNX-enabled runs add `models/*/model.onnx` and `onnx_parity.csv`.
 
 The formal confidence intervals use participant-cluster and seed hierarchical bootstrap. Paired comparisons are limited to each candidate against Threshold Impact and balanced-versus-natural sampling within the same model. Window false positives and product alarm episodes are reported separately.
 
@@ -193,5 +196,17 @@ imu-bench data activate-base \
 ```
 
 Routine users only run `data pull` and do not need bucket write access. Credentials, login caches, HDF5 files, run outputs, and the local `TODO.md` must never be committed to Git.
+
+## Immutable result publication
+
+Maintainers may publish only a clean, complete 65-job temporal-core run that uses the exact `imu_25hz_snapshot_v2` snapshot and has PASS statistical outputs:
+
+```bash
+imu-bench results publish <run-id>
+imu-bench results verify <run-id>
+imu-bench results pull <run-id>
+```
+
+Each run is stored under `gs://soft3888-label/benchmark-results/temporal-core/<run-id>/` as a no-clobber `run.tar.gz`, a SHA-256 manifest, and directly readable report/summary files. The bundle contains native models, optional ONNX models, checkpoints, OOF scores, metrics, configuration, environment, and provenance. There is no mutable results `current` pointer.
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for collaboration rules.
