@@ -15,8 +15,9 @@ from .contract import (
     load_contract_snapshot,
 )
 
-CONFIG_SCHEMA_VERSION = 3
-SUPPORTED_CONFIG_SCHEMA_VERSIONS = {2, CONFIG_SCHEMA_VERSION}
+CONFIG_SCHEMA_VERSION = 4
+SUPPORTED_CONFIG_SCHEMA_VERSIONS = {2, 3, CONFIG_SCHEMA_VERSION}
+FORMAL_CONFIG_SCHEMA_VERSIONS = {3, CONFIG_SCHEMA_VERSION}
 PUBLIC_MODEL_IDS = (
     "threshold_impact",
     "cuml_logistic_regression",
@@ -181,24 +182,24 @@ def _validate_alarm_policy(payload: dict[str, Any]) -> None:
 
 def _validate_experiment(payload: dict[str, Any]) -> None:
     common = {
-            "schema_version",
-            "id",
-            "contract_path",
-            "snapshot_path",
-            "data_view_path",
-            "model_catalog_path",
-            "models",
-            "folds",
-            "seeds",
-            "precision",
-            "gpu_mode",
-            "max_epochs",
-            "patience",
-            "max_sequences_per_split",
-            "max_windows_per_sequence",
-            "cache_flush_windows",
-            "data_quality_status",
-            "known_limitations",
+        "schema_version",
+        "id",
+        "contract_path",
+        "snapshot_path",
+        "data_view_path",
+        "model_catalog_path",
+        "models",
+        "folds",
+        "seeds",
+        "precision",
+        "gpu_mode",
+        "max_epochs",
+        "patience",
+        "max_sequences_per_split",
+        "max_windows_per_sequence",
+        "cache_flush_windows",
+        "data_quality_status",
+        "known_limitations",
     }
     schema_version = payload.get("schema_version")
     formal = {
@@ -208,9 +209,22 @@ def _validate_experiment(payload: dict[str, Any]) -> None:
         "bootstrap_replicates",
         "export_onnx",
     }
+    onnx_parity = {
+        "onnx_parity_splits",
+        "onnx_parity_batch_size",
+        "onnx_parity_max_samples",
+        "onnx_runtime_provider",
+        "onnx_parity_rtol",
+        "onnx_parity_atol",
+    }
+    expected = set(common)
+    if schema_version in FORMAL_CONFIG_SCHEMA_VERSIONS:
+        expected |= formal
+    if schema_version == CONFIG_SCHEMA_VERSION:
+        expected |= onnx_parity
     _exact_keys(
         payload,
-        common | (formal if schema_version == CONFIG_SCHEMA_VERSION else set()),
+        expected,
         "experiment",
     )
     if schema_version not in SUPPORTED_CONFIG_SCHEMA_VERSIONS:
@@ -232,7 +246,7 @@ def _validate_experiment(payload: dict[str, Any]) -> None:
         raise ValueError("Experiment seeds must be a non-empty integer list")
     if len(seeds) != len(set(seeds)):
         raise ValueError("Experiment seeds must be unique")
-    if schema_version == CONFIG_SCHEMA_VERSION:
+    if schema_version in FORMAL_CONFIG_SCHEMA_VERSIONS:
         recipes = payload["training_recipes"]
         allowed_recipes = {"natural", "participant_class_balanced"}
         if (
@@ -255,6 +269,35 @@ def _validate_experiment(payload: dict[str, Any]) -> None:
             raise ValueError("bootstrap_replicates must be a non-negative integer")
         if not isinstance(payload["export_onnx"], bool):
             raise ValueError("export_onnx must be boolean")
+    if schema_version == CONFIG_SCHEMA_VERSION:
+        parity_splits = payload["onnx_parity_splits"]
+        if (
+            not isinstance(parity_splits, list)
+            or not parity_splits
+            or len(parity_splits) != len(set(parity_splits))
+            or set(parity_splits) - {"validation", "test"}
+        ):
+            raise ValueError(
+                "onnx_parity_splits must uniquely select validation and/or test"
+            )
+        if "validation" not in parity_splits:
+            raise ValueError("ONNX parity must include the validation split")
+        if (
+            not isinstance(payload["onnx_parity_batch_size"], int)
+            or payload["onnx_parity_batch_size"] <= 0
+        ):
+            raise ValueError("onnx_parity_batch_size must be positive")
+        parity_limit = payload["onnx_parity_max_samples"]
+        if parity_limit is not None and (
+            not isinstance(parity_limit, int) or parity_limit <= 0
+        ):
+            raise ValueError("onnx_parity_max_samples must be null or positive")
+        if payload["onnx_runtime_provider"] != "cpu":
+            raise ValueError("Only the CPU ONNX Runtime provider is supported")
+        for name in ("onnx_parity_rtol", "onnx_parity_atol"):
+            value = payload[name]
+            if not isinstance(value, (int, float)) or value < 0 or value > 0.01:
+                raise ValueError(f"{name} must be between 0 and 0.01")
     for name in ("max_epochs", "patience", "cache_flush_windows"):
         if not isinstance(payload[name], int) or payload[name] <= 0:
             raise ValueError(f"{name} must be a positive integer")
@@ -319,9 +362,29 @@ def load_experiment(
                 "alarm_policy_path": None,
                 "bootstrap_replicates": 0,
                 "export_onnx": False,
+                "onnx_parity_splits": ["validation"],
+                "onnx_parity_batch_size": 256,
+                "onnx_parity_max_samples": 256,
+                "onnx_runtime_provider": "cpu",
+                "onnx_parity_rtol": 1e-4,
+                "onnx_parity_atol": 1e-4,
             }
         )
-    elif experiment["alarm_policy_path"] is not None:
+    elif experiment["schema_version"] == 3:
+        resolved.update(
+            {
+                "onnx_parity_splits": ["validation"],
+                "onnx_parity_batch_size": 256,
+                "onnx_parity_max_samples": 256,
+                "onnx_runtime_provider": "cpu",
+                "onnx_parity_rtol": 1e-4,
+                "onnx_parity_atol": 1e-4,
+            }
+        )
+    if (
+        experiment["schema_version"] in FORMAL_CONFIG_SCHEMA_VERSIONS
+        and experiment["alarm_policy_path"] is not None
+    ):
         alarm_path = _project_path(
             project_root,
             experiment["alarm_policy_path"],

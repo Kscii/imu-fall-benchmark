@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -160,22 +161,44 @@ def export_and_validate_onnx(
     sample: np.ndarray,
     native_scores: np.ndarray,
     destination: Path,
+    *,
+    additional_splits: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
+    batch_size: int = 256,
+    max_samples: int | None = 256,
+    provider: str = "cpu",
+    rtol: float = 1e-4,
+    atol: float = 1e-4,
 ) -> dict[str, Any]:
     import onnx
     import onnxruntime
 
-    values = np.ascontiguousarray(sample[:256], dtype=np.float32)
-    expected = np.asarray(native_scores[: len(values)], dtype=np.float64)
+    if batch_size <= 0:
+        raise ValueError("ONNX parity batch size must be positive")
+    if max_samples is not None and max_samples <= 0:
+        raise ValueError("ONNX parity max_samples must be null or positive")
+    if provider != "cpu":
+        raise ValueError("Only the CPU ONNX Runtime provider is supported")
+    if rtol < 0 or atol < 0:
+        raise ValueError("ONNX parity tolerances must be non-negative")
+    if len(sample) != len(native_scores):
+        raise ValueError("ONNX parity input and native-score lengths differ")
+    if not len(sample):
+        raise ValueError("ONNX export requires at least one validation sample")
+
+    export_values = np.ascontiguousarray(sample[: min(256, len(sample))], dtype=np.float32)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.parent / f"{destination.stem}.tmp-{os.getpid()}.onnx"
+    conversion_started = time.perf_counter()
     if model_id == "threshold_impact":
         onnx.save_model(_threshold_model(), temporary)
         input_name = "imu"
     elif model_id.startswith("torch_"):
-        _export_torch(adapter, model_id, values, temporary)
+        _export_torch(adapter, model_id, export_values, temporary)
         input_name = "imu"
     else:
-        onnx.save_model(_tabular_model(adapter, model_id, values.shape[1]), temporary)
+        onnx.save_model(
+            _tabular_model(adapter, model_id, export_values.shape[1]), temporary
+        )
         input_name = "features"
     model = onnx.load(temporary)
     onnx.checker.check_model(model)
@@ -183,25 +206,95 @@ def export_and_validate_onnx(
         str(temporary),
         providers=["CPUExecutionProvider"],
     )
-    tolerance = 1e-4
-    batch_sizes = sorted({size for size in (1, min(7, len(values)), len(values)) if size})
+    conversion_seconds = time.perf_counter() - conversion_started
+
+    split_inputs = {"validation": (sample, native_scores)}
+    if additional_splits:
+        overlap = set(split_inputs) & set(additional_splits)
+        if overlap:
+            raise ValueError(f"Duplicate ONNX parity splits: {sorted(overlap)}")
+        split_inputs.update(additional_splits)
+
+    parity: dict[str, dict[str, Any]] = {}
+    all_batch_sizes: set[int] = set()
+    inference_seconds = 0.0
+    comparison_seconds = 0.0
     maximum_error = 0.0
-    for batch_size in batch_sizes:
-        observed = np.asarray(
-            session.run(["fall_score"], {input_name: values[:batch_size]})[0]
-        ).reshape(-1)
-        batch_expected = expected[:batch_size]
-        batch_error = (
-            float(np.max(np.abs(observed - batch_expected))) if batch_size else 0.0
-        )
-        maximum_error = max(maximum_error, batch_error)
-        if not np.allclose(
-            observed, batch_expected, rtol=tolerance, atol=tolerance
-        ):
+    total_samples = 0
+    total_batches = 0
+    for split_name, (split_values, split_scores) in split_inputs.items():
+        if len(split_values) != len(split_scores):
             raise ValueError(
-                f"ONNX parity failed for {model_id} at batch {batch_size}: "
-                f"max_abs_error={batch_error:.8g}"
+                f"ONNX parity input and native-score lengths differ for {split_name}"
             )
+        limit = len(split_values) if max_samples is None else min(
+            len(split_values), max_samples
+        )
+        if not limit:
+            raise ValueError(f"ONNX parity split is empty: {split_name}")
+        values = np.ascontiguousarray(split_values[:limit], dtype=np.float32)
+        expected = np.asarray(split_scores[:limit], dtype=np.float64)
+        errors = np.empty(limit, dtype=np.float64)
+
+        # Retain the small dynamic-batch probes while also streaming the full split.
+        probe_sizes = sorted({1, min(7, limit), min(batch_size, limit)})
+        for probe_size in probe_sizes:
+            started = time.perf_counter()
+            observed = np.asarray(
+                session.run(
+                    ["fall_score"], {input_name: values[:probe_size]}
+                )[0]
+            ).reshape(-1)
+            inference_seconds += time.perf_counter() - started
+            started = time.perf_counter()
+            probe_error = np.abs(observed - expected[:probe_size])
+            comparison_seconds += time.perf_counter() - started
+            if not np.allclose(
+                observed, expected[:probe_size], rtol=rtol, atol=atol
+            ):
+                raise ValueError(
+                    f"ONNX parity failed for {model_id}/{split_name} at batch "
+                    f"{probe_size}: max_abs_error={float(np.max(probe_error)):.8g}, "
+                    f"rtol={rtol:.8g}, atol={atol:.8g}"
+                )
+            all_batch_sizes.add(probe_size)
+
+        batches = 0
+        for start in range(0, limit, batch_size):
+            stop = min(start + batch_size, limit)
+            current = values[start:stop]
+            started = time.perf_counter()
+            observed = np.asarray(
+                session.run(["fall_score"], {input_name: current})[0]
+            ).reshape(-1)
+            inference_seconds += time.perf_counter() - started
+            started = time.perf_counter()
+            batch_error = np.abs(observed - expected[start:stop])
+            errors[start:stop] = batch_error
+            comparison_seconds += time.perf_counter() - started
+            if not np.allclose(
+                observed, expected[start:stop], rtol=rtol, atol=atol
+            ):
+                raise ValueError(
+                    f"ONNX parity failed for {model_id}/{split_name} at samples "
+                    f"{start}:{stop}: max_abs_error={float(np.max(batch_error)):.8g}, "
+                    f"rtol={rtol:.8g}, atol={atol:.8g}"
+                )
+            all_batch_sizes.add(len(current))
+            batches += 1
+
+        split_maximum = float(np.max(errors))
+        maximum_error = max(maximum_error, split_maximum)
+        total_samples += limit
+        total_batches += batches
+        parity[split_name] = {
+            "samples": limit,
+            "batches": batches,
+            "maximum_absolute_error": split_maximum,
+            "mean_absolute_error": float(np.mean(errors)),
+            "p99_absolute_error": float(np.quantile(errors, 0.99)),
+        }
+
     temporary.replace(destination)
     return {
         "status": "PASS",
@@ -215,8 +308,20 @@ def export_and_validate_onnx(
         "input_name": input_name,
         "input_domain": "physical" if model_id == "threshold_impact" else "model_ready",
         "output_name": "fall_score",
-        "samples": len(values),
-        "validated_batch_sizes": batch_sizes,
+        "samples": total_samples,
+        "batches": total_batches,
+        "batch_size": batch_size,
+        "validated_batch_sizes": sorted(all_batch_sizes),
+        "parity_splits": parity,
         "maximum_absolute_error": maximum_error,
-        "absolute_relative_tolerance": tolerance,
+        "relative_tolerance": rtol,
+        "absolute_tolerance": atol,
+        "timing": {
+            "conversion_seconds": conversion_seconds,
+            "runtime_inference_seconds": inference_seconds,
+            "comparison_seconds": comparison_seconds,
+            "total_seconds": (
+                conversion_seconds + inference_seconds + comparison_seconds
+            ),
+        },
     }

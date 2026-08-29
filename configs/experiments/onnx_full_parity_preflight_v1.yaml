@@ -1,0 +1,39 @@
+schema_version: 4
+id: onnx_full_parity_preflight_v1
+contract_path: configs/contracts/imu_benchmark_contract_v2.json
+snapshot_path: active.json
+data_view_path: configs/data_views/temporal_core_v1.yaml
+model_catalog_path: configs/models/fall_models_v1.yaml
+alarm_policy_path: configs/evaluation/alarm_policies_v1.yaml
+models:
+  - threshold_impact
+  - cuml_logistic_regression
+  - cuml_random_forest
+  - xgboost_cuda
+  - torch_1d_cnn
+  - torch_lstm
+  - torch_cnn_lstm
+folds: [0]
+seeds: [3888]
+seed_policy: deterministic_models_single_seed
+training_recipes: [natural]
+precision: fp32
+gpu_mode: auto
+max_epochs: 2
+patience: 1
+max_sequences_per_split: null
+max_windows_per_sequence: null
+cache_flush_windows: 16384
+bootstrap_replicates: 0
+export_onnx: true
+onnx_parity_splits: [validation, test]
+onnx_parity_batch_size: 256
+onnx_parity_max_samples: null
+onnx_runtime_provider: cpu
+onnx_parity_rtol: 0.0001
+onnx_parity_atol: 0.002
+data_quality_status: engineering_full_onnx_parity_preflight_only
+known_limitations:
+  - This run measures full validation/test ONNX parity and its cost on one fold.
+  - Its two-epoch models are conversion fixtures, not model-comparison evidence.
+  - Python ONNX Runtime CPU parity is not Android Runtime or device-performance evidence.

@@ -64,6 +64,25 @@ def test_smoke_plan_contains_seven_public_fall_models(active_manifest_path: Path
     assert all(job["objective"] == "temporal_supervised" for job in result["jobs"])
 
 
+def test_temporal_core_onnx_plan_contains_65_full_parity_jobs(
+    active_manifest_path: Path,
+) -> None:
+    config = load_experiment(
+        PROJECT_ROOT,
+        PROJECT_ROOT
+        / "configs/experiments/formal_baseline_temporal_core_onnx_v1.yaml",
+        snapshot_path=active_manifest_path,
+    )
+    result = plan_experiment(config)
+    assert result["scheduled_jobs"] == 65
+    assert config["export_onnx"] is True
+    assert config["onnx_parity_splits"] == ["validation", "test"]
+    assert config["onnx_parity_batch_size"] == 256
+    assert config["onnx_parity_max_samples"] is None
+    assert config["onnx_parity_rtol"] == 1e-4
+    assert config["onnx_parity_atol"] == 2e-3
+
+
 def test_team_fold_is_training_only(active_manifest_path: Path) -> None:
     config = load_experiment(
         PROJECT_ROOT,

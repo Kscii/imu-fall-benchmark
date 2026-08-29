@@ -630,13 +630,25 @@ def _model_scores(
         artifacts = _save_native_model(run_dir, job, None, spec, normalization)
         if config["export_onnx"]:
             onnx_path = _model_artifact_dir(run_dir, job) / "model.onnx"
-            onnx_metadata = export_and_validate_onnx(
-                None,
-                job.model_id,
-                raw[split.validation],
-                validation,
-                onnx_path,
+            additional_splits = (
+                {"test": (raw[split.test], test)}
+                if "test" in config["onnx_parity_splits"]
+                else None
             )
+            with phases.track("onnx_export_and_parity_seconds"):
+                onnx_metadata = export_and_validate_onnx(
+                    None,
+                    job.model_id,
+                    raw[split.validation],
+                    validation,
+                    onnx_path,
+                    additional_splits=additional_splits,
+                    batch_size=int(config["onnx_parity_batch_size"]),
+                    max_samples=config["onnx_parity_max_samples"],
+                    provider=str(config["onnx_runtime_provider"]),
+                    rtol=float(config["onnx_parity_rtol"]),
+                    atol=float(config["onnx_parity_atol"]),
+                )
             onnx_metadata["path"] = str(onnx_path.relative_to(run_dir))
             artifacts["onnx"] = onnx_metadata
         return (
@@ -820,13 +832,25 @@ def _model_scores(
     artifacts = _save_native_model(run_dir, job, adapter, spec, normalization)
     if config["export_onnx"]:
         onnx_path = _model_artifact_dir(run_dir, job) / "model.onnx"
-        onnx_metadata = export_and_validate_onnx(
-            adapter,
-            job.model_id,
-            validation_values,
-            validation,
-            onnx_path,
+        additional_splits = (
+            {"test": (test_values, test)}
+            if "test" in config["onnx_parity_splits"]
+            else None
         )
+        with phases.track("onnx_export_and_parity_seconds"):
+            onnx_metadata = export_and_validate_onnx(
+                adapter,
+                job.model_id,
+                validation_values,
+                validation,
+                onnx_path,
+                additional_splits=additional_splits,
+                batch_size=int(config["onnx_parity_batch_size"]),
+                max_samples=config["onnx_parity_max_samples"],
+                provider=str(config["onnx_runtime_provider"]),
+                rtol=float(config["onnx_parity_rtol"]),
+                atol=float(config["onnx_parity_atol"]),
+            )
         onnx_metadata["path"] = str(onnx_path.relative_to(run_dir))
         artifacts["onnx"] = onnx_metadata
     metadata = {
@@ -1120,14 +1144,57 @@ def _alarm_result_rows(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+def _onnx_result_rows(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for result in results:
+        metadata = result["metadata"]
+        onnx = metadata.get("artifacts", {}).get("onnx")
+        if onnx is None:
+            continue
+        job = metadata["job"]
+        timing = onnx["timing"]
+        for split_name, parity in onnx["parity_splits"].items():
+            rows.append(
+                {
+                    "data_view": job["data_view_id"],
+                    "model_id": job["model_id"],
+                    "training_recipe": job.get(
+                        "training_recipe", "legacy_unknown"
+                    ),
+                    "fold": job["fold"],
+                    "seed": job["seed"],
+                    "split": split_name,
+                    "samples": parity["samples"],
+                    "batches": parity["batches"],
+                    "batch_size": onnx["batch_size"],
+                    "relative_tolerance": onnx["relative_tolerance"],
+                    "absolute_tolerance": onnx["absolute_tolerance"],
+                    "maximum_absolute_error": parity[
+                        "maximum_absolute_error"
+                    ],
+                    "mean_absolute_error": parity["mean_absolute_error"],
+                    "p99_absolute_error": parity["p99_absolute_error"],
+                    "conversion_seconds": timing["conversion_seconds"],
+                    "runtime_inference_seconds": timing[
+                        "runtime_inference_seconds"
+                    ],
+                    "comparison_seconds": timing["comparison_seconds"],
+                    "onnx_sha256": onnx["sha256"],
+                }
+            )
+    return rows
+
+
 def _write_report(run_dir: Path, summary: dict[str, Any], results: list[dict[str, Any]]) -> None:
     metric_rows, event_rows, subgroup_rows, external_rows = _result_rows(results)
     alarm_rows = _alarm_result_rows(results)
+    onnx_rows = _onnx_result_rows(results)
     _write_csv(run_dir / "metrics.csv", metric_rows)
     _write_csv(run_dir / "event_metrics.csv", event_rows)
     _write_csv(run_dir / "subgroup_metrics.csv", subgroup_rows)
     _write_csv(run_dir / "external_metrics.csv", external_rows)
     _write_csv(run_dir / "alarm_metrics.csv", alarm_rows)
+    _write_csv(run_dir / "onnx_parity.csv", onnx_rows)
     lines = [
         f"# Experiment report: {summary['experiment_id']}",
         "",
@@ -1158,6 +1225,26 @@ def _write_report(run_dir: Path, summary: dict[str, Any], results: list[dict[str
         )
     if not metric_rows:
         lines.append("No completed jobs are available.")
+    if onnx_rows:
+        samples = sum(int(row["samples"]) for row in onnx_rows)
+        maximum_error = max(
+            float(row["maximum_absolute_error"]) for row in onnx_rows
+        )
+        relative_tolerance = float(onnx_rows[0]["relative_tolerance"])
+        absolute_tolerance = float(onnx_rows[0]["absolute_tolerance"])
+        lines.extend(
+            [
+                "",
+                "## ONNX parity",
+                "",
+                f"- Validated split rows: {len(onnx_rows)}",
+                f"- Native/ONNX score comparisons: {samples}",
+                f"- Maximum absolute error: {maximum_error:.8g}",
+                f"- Acceptance tolerance: rtol={relative_tolerance:.8g}, "
+                f"atol={absolute_tolerance:.8g}",
+                "- Full details: `onnx_parity.csv`",
+            ]
+        )
     lines.extend(["", "## Known limitations", ""])
     lines.extend(f"- {item}" for item in summary["known_limitations"])
     lines.extend(
@@ -1320,6 +1407,9 @@ def run_experiment(
         "cached_jobs_this_invocation": sum(result["status"] == "cached" for result in results),
         "failures": failures,
         "data_view_id": config["data_view"]["id"],
+        "base_snapshot_id": config["snapshot"]["base_snapshot_id"],
+        "snapshot_sha256": config["snapshot_sha256"],
+        "resolved_config_sha256": config["resolved_config_sha256"],
         "research_only": config["data_view"]["research_only"],
         "data_quality_status": config["data_quality_status"],
         "precision": config["precision"],
