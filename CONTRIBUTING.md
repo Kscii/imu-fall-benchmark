@@ -12,6 +12,8 @@ Run inside WSL2:
 imu-bench test
 imu-bench validate-data
 imu-bench plan configs/experiments/temporal_smoke_v1.yaml
+imu-bench run configs/experiments/onnx_preflight_v1.yaml --resume
+imu-bench run configs/experiments/formal_pipeline_smoke_v1.yaml --resume
 ```
 
 For pure Python or contract unit-test changes, another Linux development host may run:
@@ -35,6 +37,7 @@ GitHub Actions runs only the shell syntax check, Ruff, and data-independent pyte
 - Changes to sampling rate, windows, stride, labels, folds, or metrics must increment the relevant schema, contract, or configuration version and add regression tests.
 - Never change a seed, split, threshold-selection rule, or data filter silently to improve results.
 - Preserve the resolved configuration, source provenance, environment, logs, and machine-readable metrics for every result.
+- Stage immutable snapshot files first and switch `current.json` only as a separate reviewed operation.
 
 ## Code rules
 
@@ -46,4 +49,4 @@ GitHub Actions runs only the shell syntax check, Ruff, and data-independent pyte
 
 ## Reporting results
 
-A smoke run proves only that the workflow executes. A single-fold pilot is engineering validation, not a final model conclusion. Formal comparison requires the team to agree on data scope, folds, seeds, metrics, threshold protocol, and retained artefacts first. Do not call `fall_score` a probability before completing a separate calibration process.
+A smoke run proves only that the workflow executes. ONNX preflight proves conversion and Python Runtime parity, not Android or model quality. Formal comparison requires a clean source, exact snapshot, frozen folds, seeds, recipes, alarm policies, retained OOF scores, and participant-level uncertainty analysis. Do not call `fall_score` a probability before completing a separate calibration process.
