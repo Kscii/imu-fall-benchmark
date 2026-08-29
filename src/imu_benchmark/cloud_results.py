@@ -28,6 +28,7 @@ from .model_catalog import (
 from .progress import NullProgressReporter, ProgressReporter
 
 RESULT_MANIFEST_SCHEMA = EXPERIMENT_PUBLICATION_SCHEMA
+LEGACY_RESULT_MANIFEST_SCHEMA = "imu_benchmark_result_manifest_v1"
 RESULT_PREFIXES = {
     "formal_cv": "benchmark-results/temporal-core",
     "engineering": "benchmark-results/engineering",
@@ -215,6 +216,26 @@ def _publication_manifest(
 
 
 def _validate_publication_manifest(payload: dict[str, Any], *, run_id: str) -> None:
+    if payload.get("schema_version") == LEGACY_RESULT_MANIFEST_SCHEMA:
+        expected_v1 = {
+            "schema_version",
+            "run_id",
+            "experiment_id",
+            "scheduled_jobs",
+            "source",
+            "base_snapshot_id",
+            "snapshot_sha256",
+            "resolved_config_sha256",
+            "bundle",
+            "files",
+            "quick_files",
+        }
+        if set(payload) != expected_v1:
+            raise ValueError("Invalid legacy result publication manifest")
+        if payload.get("run_id") != run_id or payload.get("scheduled_jobs") != 65:
+            raise ValueError("Legacy result publication describes a different run")
+        _validate_result_files_and_bundle(payload)
+        return
     expected = {
         "schema_version",
         "run_id",
@@ -244,37 +265,7 @@ def _validate_publication_manifest(payload: dict[str, Any], *, run_id: str) -> N
         raise ValueError("Result publication manifest has an invalid evidence level")
     if payload.get("scheduled_jobs") not in {7, 65}:
         raise ValueError("Result publication manifest has an invalid job count")
-    bundle = payload.get("bundle")
-    if (
-        not isinstance(bundle, dict)
-        or set(bundle) != {"filename", "size_bytes", "sha256"}
-        or bundle.get("filename") != "run.tar.gz"
-        or not isinstance(bundle.get("size_bytes"), int)
-        or bundle["size_bytes"] <= 0
-        or not isinstance(bundle.get("sha256"), str)
-        or not re.fullmatch(r"[0-9a-f]{64}", bundle["sha256"])
-    ):
-        raise ValueError("Invalid result bundle metadata")
-    files = payload.get("files")
-    if not isinstance(files, list) or not files:
-        raise ValueError("Result publication manifest contains no files")
-    paths = set()
-    for entry in files:
-        if (
-            not isinstance(entry, dict)
-            or set(entry) != {"path", "size_bytes", "sha256"}
-            or not isinstance(entry["path"], str)
-            or not entry["path"]
-            or Path(entry["path"]).is_absolute()
-            or ".." in Path(entry["path"]).parts
-            or entry["path"] in paths
-            or not isinstance(entry["size_bytes"], int)
-            or entry["size_bytes"] < 0
-            or not isinstance(entry["sha256"], str)
-            or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])
-        ):
-            raise ValueError("Invalid result publication file entry")
-        paths.add(entry["path"])
+    _validate_result_files_and_bundle(payload)
     direct_files = payload.get("direct_files")
     if not isinstance(direct_files, list) or not direct_files:
         raise ValueError("Result publication manifest contains no direct downloads")
@@ -312,6 +303,40 @@ def _validate_publication_manifest(payload: dict[str, Any], *, run_id: str) -> N
         or len(payload["artifacts"]) != payload["scheduled_jobs"]
     ):
         raise ValueError("Result publication manifest contains incomplete ONNX artifacts")
+
+
+def _validate_result_files_and_bundle(payload: dict[str, Any]) -> None:
+    bundle = payload.get("bundle")
+    if (
+        not isinstance(bundle, dict)
+        or set(bundle) != {"filename", "size_bytes", "sha256"}
+        or bundle.get("filename") != "run.tar.gz"
+        or not isinstance(bundle.get("size_bytes"), int)
+        or bundle["size_bytes"] <= 0
+        or not isinstance(bundle.get("sha256"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", bundle["sha256"])
+    ):
+        raise ValueError("Invalid result bundle metadata")
+    files = payload.get("files")
+    if not isinstance(files, list) or not files:
+        raise ValueError("Result publication manifest contains no files")
+    paths = set()
+    for entry in files:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"path", "size_bytes", "sha256"}
+            or not isinstance(entry["path"], str)
+            or not entry["path"]
+            or Path(entry["path"]).is_absolute()
+            or ".." in Path(entry["path"]).parts
+            or entry["path"] in paths
+            or not isinstance(entry["size_bytes"], int)
+            or entry["size_bytes"] < 0
+            or not isinstance(entry["sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])
+        ):
+            raise ValueError("Invalid result publication file entry")
+        paths.add(entry["path"])
 
 
 def _prepare_direct_files(
@@ -430,6 +455,14 @@ def _remote_manifest(bucket: str, run_id: str) -> dict[str, Any]:
     raise FileNotFoundError(f"Published result not found: {run_id}")
 
 
+def _manifest_prefix(manifest: dict[str, Any]) -> str:
+    evidence_level = str(manifest.get("evidence_level") or "formal_cv")
+    try:
+        return RESULT_PREFIXES[evidence_level]
+    except KeyError as error:
+        raise ValueError("Result manifest has an invalid evidence level") from error
+
+
 def _download(uri: str, destination: Path) -> None:
     _run_gcloud("storage", "cp", uri, str(destination))
 
@@ -521,7 +554,7 @@ def publish_result(
             )
         with reporter.task("Uploading through the constrained team broker"):
             completed = publish_model_artifacts(
-                publication_kind="experiment",
+                publication_kind="result",
                 publication_id=run_id,
                 marker=publication,
                 artifacts=artifacts,
@@ -555,7 +588,7 @@ def verify_result(
     bucket = data_bucket()
     with reporter.task("Reading the immutable result manifest"):
         manifest = _remote_manifest(bucket, run_id)
-    prefix = f"{RESULT_PREFIXES[manifest['evidence_level']]}/{run_id}"
+    prefix = f"{_manifest_prefix(manifest)}/{run_id}"
     with tempfile.TemporaryDirectory(prefix="imu-result-verify-") as temporary:
         bundle_path = Path(temporary) / "run.tar.gz"
         with reporter.task("Downloading and verifying the result bundle"):
@@ -606,7 +639,7 @@ def pull_result(
             "path": str(destination),
             "reused": True,
         }
-    prefix = f"{RESULT_PREFIXES[manifest['evidence_level']]}/{run_id}"
+    prefix = f"{_manifest_prefix(manifest)}/{run_id}"
     with tempfile.TemporaryDirectory(prefix="imu-result-pull-", dir=runs_root) as temporary:
         temporary_root = Path(temporary)
         bundle_path = temporary_root / "run.tar.gz"
@@ -639,5 +672,5 @@ def restore_published_result(
         raise ValueError("Invalid result run ID")
     ensure_gcloud_login(interactive=False)
     return restore_model_publication(
-        "experiment", run_id, expected_generation=expected_generation
+        "result", run_id, expected_generation=expected_generation
     )

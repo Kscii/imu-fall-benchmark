@@ -37,7 +37,7 @@ def test_model_broker_uses_gcloud_identity_and_resumable_session(
                     "sessions": [
                         {
                             "file_id": "model",
-                            "object_key": "benchmark-models/packages/example/files/model.onnx",
+                            "object_key": "benchmark-model-catalog/models/example/model.onnx",
                             "session_url": "https://storage.example/session",
                             "already_present": False,
                         }
@@ -47,9 +47,9 @@ def test_model_broker_uses_gcloud_identity_and_resumable_session(
         assert timeout == 900
         return _Response(
             {
-                "publication_kind": "package",
+                "publication_kind": "model",
                 "publication_id": "example",
-                "marker_object": "benchmark-models/packages/example/publication.json",
+                "marker_object": "benchmark-model-catalog/models/example/metadata.json",
                 "marker_generation": 1,
                 "verified_sha256": True,
             }
@@ -64,14 +64,14 @@ def test_model_broker_uses_gcloud_identity_and_resumable_session(
     monkeypatch.setattr(model_broker.requests, "put", put)
     artifact = {
         "file_id": "model",
-        "object_key": "benchmark-models/packages/example/files/model.onnx",
+        "object_key": "benchmark-model-catalog/models/example/model.onnx",
         "size_bytes": 4,
         "sha256": "a" * 64,
         "content_type": "application/octet-stream",
     }
 
     result = model_broker.publish_model_artifacts(
-        publication_kind="package",
+        publication_kind="model",
         publication_id="example",
         marker={"schema_version": "fixture"},
         artifacts=[artifact],
@@ -95,13 +95,13 @@ def test_model_broker_rejects_source_descriptor_mismatch(tmp_path: Path) -> None
     source.write_bytes(b"onnx")
     try:
         model_broker.publish_model_artifacts(
-            publication_kind="package",
+            publication_kind="model",
             publication_id="example",
             marker={},
             artifacts=[
                 {
                     "file_id": "different",
-                    "object_key": "benchmark-models/packages/example/files/model.onnx",
+                    "object_key": "benchmark-model-catalog/models/example/model.onnx",
                     "size_bytes": 4,
                     "sha256": "a" * 64,
                     "content_type": "application/octet-stream",

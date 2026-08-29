@@ -73,6 +73,7 @@ def _formal_run(tmp_path: Path) -> Path:
         metrics.append(
             {
                 **base,
+                "threshold": 0.5,
                 **{name: 0.8 + index / 100 for name in (
                     "accuracy", "balanced_accuracy", "sensitivity", "specificity",
                     "precision", "f1", "mcc", "auroc", "auprc",
@@ -95,6 +96,8 @@ def _formal_run(tmp_path: Path) -> Path:
                 **base,
                 "alarm_policy_id": "reference",
                 "reference_policy": True,
+                "validation_pareto": True,
+                "threshold": 0.5,
                 "event_sensitivity": 0.85,
                 "adl_recording_false_positive_rate": 0.08,
                 "adl_alarm_episodes_per_hour": 1.5,
@@ -135,6 +138,32 @@ def _formal_run(tmp_path: Path) -> Path:
                 }
             }
         ),
+        encoding="utf-8",
+    )
+    (run_dir / "resolved_config.yaml").write_text(
+        json.dumps(
+            {
+                "alarm_policy_sha256": "f" * 64,
+                "alarm_policy": {
+                    "schema_version": 1,
+                    "reference_policy": "reference",
+                    "selection": "validation_pareto_sensitivity_alarm_rate_latency",
+                    "policies": [
+                        {
+                            "id": "reference",
+                            "required_positive_windows": 1,
+                            "lookback_windows": 1,
+                            "consecutive": True,
+                            "cooldown_seconds": 10.0,
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "environment.json").write_text(
+        json.dumps({"onnx": "fixture", "onnxruntime": "fixture"}),
         encoding="utf-8",
     )
     (run_dir / "report.md").write_text("# report\n", encoding="utf-8")
@@ -231,3 +260,26 @@ def test_result_publication_rejects_onnx_different_from_parity_evidence(
 
     with pytest.raises(ValueError, match="differs from the parity evidence"):
         _validate_run(run_dir)
+
+
+def test_existing_result_v1_manifest_remains_readable() -> None:
+    run_id = "formal_baseline_temporal_core_onnx_v1-existing"
+    payload = {
+        "schema_version": "imu_benchmark_result_manifest_v1",
+        "run_id": run_id,
+        "experiment_id": "formal_baseline_temporal_core_onnx_v1",
+        "scheduled_jobs": 65,
+        "source": {"commit": "a" * 40, "dirty": False},
+        "base_snapshot_id": "imu_25hz_snapshot_v2",
+        "snapshot_sha256": "b" * 64,
+        "resolved_config_sha256": "c" * 64,
+        "bundle": {
+            "filename": "run.tar.gz",
+            "size_bytes": 10,
+            "sha256": "d" * 64,
+        },
+        "files": [{"path": "report.md", "size_bytes": 1, "sha256": "e" * 64}],
+        "quick_files": [],
+    }
+
+    _validate_publication_manifest(payload, run_id=run_id)

@@ -11,9 +11,13 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from .data import FEATURE_NAMES
 
 EXPERIMENT_PUBLICATION_SCHEMA = "imu_benchmark_result_manifest_v2"
+EXPERIMENT_CATALOG_SCHEMA = "imu_experiment_catalog_v0"
+EXPERIMENT_CATALOG_CONTRACT_VERSION = "0.1.0"
 FORMAL_EXPERIMENT_ID = "formal_baseline_temporal_core_onnx_v1"
 ENGINEERING_EXPERIMENT_ID = "onnx_full_parity_preflight_v1"
 EVIDENCE_LEVELS = {
@@ -67,6 +71,16 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         raise ValueError(f"Required result table is missing: {path.name}")
     with path.open(newline="", encoding="utf-8") as source:
         return [dict(row) for row in csv.DictReader(source)]
+
+
+def _read_yaml(path: Path) -> dict[str, Any]:
+    try:
+        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, yaml.YAMLError) as error:
+        raise ValueError(f"Invalid YAML file: {path}") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"Expected a YAML object: {path}")
+    return value
 
 
 def _sha256(path: Path) -> str:
@@ -226,6 +240,28 @@ def build_experiment_catalog(
     cache = provenance.get("cache_manifest")
     if not isinstance(cache, dict) or not isinstance(cache.get("feature_schema_version"), str):
         raise ValueError("Run provenance lacks feature schema")
+    resolved = _read_yaml(run_dir / "resolved_config.yaml")
+    alarm_config = resolved.get("alarm_policy")
+    if not isinstance(alarm_config, dict):
+        raise ValueError("Resolved config lacks alarm_policy")
+    policy_rows = alarm_config.get("policies")
+    if not isinstance(policy_rows, list) or not policy_rows:
+        raise ValueError("Resolved config has no alarm policies")
+    policies: dict[str, dict[str, Any]] = {}
+    for policy in policy_rows:
+        if not isinstance(policy, dict) or not isinstance(policy.get("id"), str):
+            raise ValueError("Resolved config has an invalid alarm policy")
+        if policy["id"] in policies:
+            raise ValueError("Resolved config has duplicate alarm policies")
+        policies[policy["id"]] = policy
+    if set(policies) != {
+        str(row.get("alarm_policy_id") or "") for row in all_alarm_rows
+    }:
+        raise ValueError("Alarm result policies differ from the resolved config")
+    alarm_policy_sha256 = resolved.get("alarm_policy_sha256")
+    if not isinstance(alarm_policy_sha256, str) or len(alarm_policy_sha256) != 64:
+        raise ValueError("Resolved config lacks alarm_policy_sha256")
+    environment = _read_json(run_dir / "environment.json")
 
     artifacts: list[dict[str, Any]] = []
     artifact_keys: set[tuple[str, str, int, int]] = set()
@@ -261,6 +297,29 @@ def build_experiment_catalog(
             raise ValueError(
                 f"ONNX artifact differs from the parity evidence: {artifact_id}"
             )
+        threshold = _float(metrics[key], "threshold")
+        if any(_float(row, "threshold") != threshold for row in alarm_policies[key]):
+            raise ValueError(f"Alarm rows disagree on score threshold: {artifact_id}")
+        artifact_policies = []
+        for row in sorted(
+            alarm_policies[key], key=lambda item: item.get("alarm_policy_id", "")
+        ):
+            policy_id = str(row.get("alarm_policy_id") or "")
+            definition = policies[policy_id]
+            artifact_policies.append(
+                {
+                    "policy_id": policy_id,
+                    "required_positive_windows": int(
+                        definition["required_positive_windows"]
+                    ),
+                    "lookback_windows": int(definition["lookback_windows"]),
+                    "consecutive": bool(definition["consecutive"]),
+                    "cooldown_seconds": float(definition["cooldown_seconds"]),
+                    "reference_policy": _truth(row.get("reference_policy")),
+                    "validation_pareto": _truth(row.get("validation_pareto")),
+                    "metrics": _metric_values(row, ALARM_METRICS),
+                }
+            )
         artifacts.append(
             {
                 "artifact_id": artifact_id,
@@ -285,19 +344,25 @@ def build_experiment_catalog(
                         **_metric_values(alarms[key], ALARM_METRICS),
                     },
                 },
-                "alarm_policies": [
-                    {
-                        "policy_id": row.get("alarm_policy_id"),
-                        "reference_policy": _truth(row.get("reference_policy")),
-                        "validation_pareto": _truth(row.get("validation_pareto")),
-                        **_metric_values(row, ALARM_METRICS),
-                    }
-                    for row in sorted(
-                        alarm_policies[key], key=lambda item: item.get("alarm_policy_id", "")
-                    )
-                ],
+                "decision": {
+                    "score_threshold": {
+                        "value": threshold,
+                        "selection_method": "maximum_validation_balanced_accuracy",
+                        "selection_split": "validation",
+                        "comparison": ">=",
+                    },
+                    "anchor": "window_end",
+                    "alarm_policy_schema_version": alarm_config.get("schema_version"),
+                    "alarm_policy_sha256": alarm_policy_sha256,
+                    "trigger_policies": artifact_policies,
+                },
                 "parity": {
                     "status": "PASS",
+                    "runtime": {
+                        "provider": "CPUExecutionProvider",
+                        "onnx": environment.get("onnx"),
+                        "onnxruntime": environment.get("onnxruntime"),
+                    },
                     "splits": [
                         {
                             "split": row["split"],
@@ -354,6 +419,8 @@ def build_experiment_catalog(
         )
 
     return {
+        "schema_version": EXPERIMENT_CATALOG_SCHEMA,
+        "contract_version": EXPERIMENT_CATALOG_CONTRACT_VERSION,
         "evidence_level": evidence_level,
         "evaluation_fingerprint": _evaluation_fingerprint(run_dir, run_manifest),
         "methods": methods,

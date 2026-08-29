@@ -204,6 +204,7 @@ def test_exact_team_snapshot_preserves_collection_prefix(
     )
     manifest["kind"] = "team"
     manifest["snapshot_id"] = "snapshot-team-v1"
+    manifest["handoff_contract_version"] = "0.1.0"
     for entry in manifest["files"]:
         entry["evaluation_role"] = "training_only"
     manifest_bytes = (json.dumps(manifest, sort_keys=True) + "\n").encode()

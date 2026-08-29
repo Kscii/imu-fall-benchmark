@@ -1,18 +1,14 @@
-"""Validate and publish immutable final ONNX model packages."""
+"""Validate and publish immutable two-file ONNX model releases."""
 
 from __future__ import annotations
 
-import gzip
-import hashlib
 import json
 import re
-import tarfile
-import tempfile
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import numpy as np
+import onnx
+import onnxruntime as ort
 
 from .cloud_data import (
     _gcloud_cat,
@@ -25,19 +21,10 @@ from .cloud_data import (
 from .model_broker import publish_model_artifacts, restore_model_publication
 from .progress import NullProgressReporter, ProgressReporter
 
-PACKAGE_MANIFEST_SCHEMA = "imu_model_package_manifest_v1"
-PACKAGE_PUBLICATION_SCHEMA = "imu_model_package_publication_v1"
-PACKAGE_STATE_SCHEMA = "imu_model_publication_state_v1"
-PACKAGE_PREFIX = "benchmark-models/packages"
-REQUIRED_FILES = (
-    "model.onnx",
-    "manifest.json",
-    "runtime_config.json",
-    "metrics.json",
-    "golden_input.npz",
-    "golden_output.npz",
-    "checksums.sha256",
-)
+MODEL_RELEASE_SCHEMA = "imu_model_release_v0"
+MODEL_RELEASE_CONTRACT_VERSION = "0.1.0"
+MODEL_RELEASE_PREFIX = "benchmark-model-catalog/models"
+REQUIRED_FILES = ("metadata.json", "model.onnx")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -52,292 +39,196 @@ def _json(path: Path) -> dict[str, Any]:
     return value
 
 
-def _json_bytes(value: object) -> bytes:
-    return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+def _nonempty_object(value: Any, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or not value:
+        raise ValueError(f"Model release {name} is invalid")
+    return value
 
 
-def _package_id(model_code: str, logical_digest: str) -> str:
-    return f"{model_code}-{logical_digest[:12]}"
-
-
-def _validate_manifest(package_dir: Path) -> dict[str, Any]:
-    manifest = _json(package_dir / "manifest.json")
+def _validate_metadata(root: Path) -> dict[str, Any]:
+    metadata = _json(root / "metadata.json")
     required = {
         "schema_version",
+        "contract_version",
+        "release_id",
         "model_code",
-        "display_name",
+        "name",
+        "created_at_utc",
         "source",
+        "data",
         "input",
         "output",
         "preprocessing",
+        "decision",
+        "metrics",
         "validation",
         "known_limitations",
+        "model",
     }
-    if set(manifest) != required or manifest.get("schema_version") != PACKAGE_MANIFEST_SCHEMA:
-        raise ValueError("Model package manifest schema is invalid")
-    model_code = manifest.get("model_code")
-    if not isinstance(model_code, str) or not _IDENTIFIER.fullmatch(model_code):
-        raise ValueError("Model package model_code is invalid")
-    if not isinstance(manifest.get("display_name"), str) or not manifest["display_name"].strip():
-        raise ValueError("Model package display_name is missing")
-    source = manifest.get("source")
+    if set(metadata) != required:
+        raise ValueError("Model release metadata fields differ from the contract")
     if (
-        not isinstance(source, dict)
-        or source.get("dirty") is not False
-        or not isinstance(source.get("commit"), str)
-        or not source["commit"]
+        metadata.get("schema_version") != MODEL_RELEASE_SCHEMA
+        or metadata.get("contract_version") != MODEL_RELEASE_CONTRACT_VERSION
     ):
-        raise ValueError("Model package requires a clean source commit")
-    input_contract = manifest.get("input")
+        raise ValueError("Model release metadata schema is invalid")
+    for name in ("release_id", "model_code"):
+        value = metadata.get(name)
+        if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
+            raise ValueError(f"Model release {name} is invalid")
+    if not isinstance(metadata.get("name"), str) or not metadata["name"].strip():
+        raise ValueError("Model release name is missing")
+    for name in ("source", "data", "input", "output", "preprocessing", "metrics"):
+        _nonempty_object(metadata.get(name), name)
+    source = metadata["source"]
+    if source.get("dirty") is not False or not source.get("commit"):
+        raise ValueError("Model release requires a clean source commit")
+    output = metadata["output"]
+    if output.get("semantic") != "fall_score" or output.get("dtype") != "float32":
+        raise ValueError("Model release output contract is invalid")
+    decision = _nonempty_object(metadata.get("decision"), "decision")
+    threshold = _nonempty_object(decision.get("score_threshold"), "score threshold")
     if (
-        not isinstance(input_contract, dict)
-        or input_contract.get("semantic")
-        not in {"si_window", "normalized_window", "engineered_features"}
-        or input_contract.get("dtype") != "float32"
-        or not isinstance(input_contract.get("shape"), list)
+        not isinstance(threshold.get("value"), (int, float))
+        or threshold.get("comparison") != ">="
+        or decision.get("anchor") != "window_end"
     ):
-        raise ValueError("Model package input contract is invalid")
-    output_contract = manifest.get("output")
+        raise ValueError("Model release score threshold is invalid")
+    trigger = _nonempty_object(decision.get("trigger_policy"), "trigger policy")
+    trigger_required = {
+        "policy_id",
+        "required_positive_windows",
+        "lookback_windows",
+        "consecutive",
+        "cooldown_seconds",
+    }
+    if not trigger_required.issubset(trigger):
+        raise ValueError("Model release trigger policy is incomplete")
+    validation = _nonempty_object(metadata.get("validation"), "validation")
     if (
-        not isinstance(output_contract, dict)
-        or output_contract.get("semantic") != "fall_score"
-        or output_contract.get("name") != "fall_score"
-        or output_contract.get("dtype") != "float32"
-    ):
-        raise ValueError("Model package output contract is invalid")
-    validation = manifest.get("validation")
-    if (
-        not isinstance(validation, dict)
-        or validation.get("onnx_checker") != "PASS"
+        validation.get("onnx_checker") != "PASS"
         or validation.get("python_onnxruntime_parity") != "PASS"
         or validation.get("external_runtime") not in {"PASS", "not_tested"}
         or validation.get("device_replay") not in {"PASS", "not_tested"}
     ):
-        raise ValueError("Model package validation status is invalid")
-    if not isinstance(manifest.get("known_limitations"), list):
-        raise ValueError("Model package known_limitations is invalid")
-    return manifest
-
-
-def _parse_checksums(path: Path) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        parts = line.split("  ", 1)
-        if len(parts) != 2 or not _SHA256.fullmatch(parts[0]):
-            raise ValueError("checksums.sha256 has an invalid line")
-        filename = parts[1]
-        if Path(filename).name != filename or filename in result:
-            raise ValueError("checksums.sha256 has an unsafe or duplicate filename")
-        result[filename] = parts[0]
-    return result
-
-
-def _validate_onnx_and_golden(package_dir: Path) -> None:
-    import onnx
-    import onnxruntime as ort
-
-    model_path = package_dir / "model.onnx"
-    onnx.checker.check_model(onnx.load(model_path))
-    with np.load(package_dir / "golden_input.npz", allow_pickle=False) as archive:
-        if set(archive.files) != {"input"}:
-            raise ValueError("golden_input.npz must contain only input")
-        values = np.ascontiguousarray(archive["input"], dtype=np.float32)
-    with np.load(package_dir / "golden_output.npz", allow_pickle=False) as archive:
-        if set(archive.files) != {"output"}:
-            raise ValueError("golden_output.npz must contain only output")
-        expected = np.asarray(archive["output"], dtype=np.float32)
-    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
-    if len(session.get_inputs()) != 1:
-        raise ValueError("Model package ONNX must have exactly one input")
-    observed = np.asarray(
-        session.run(["fall_score"], {session.get_inputs()[0].name: values})[0],
-        dtype=np.float32,
+        raise ValueError("Model release validation status is invalid")
+    if not isinstance(metadata.get("known_limitations"), list):
+        raise ValueError("Model release known_limitations is invalid")
+    descriptor = _nonempty_object(metadata.get("model"), "model descriptor")
+    expected_key = (
+        f"{MODEL_RELEASE_PREFIX}/{metadata['release_id']}/model.onnx"
     )
-    if observed.shape != expected.shape or not np.allclose(
-        observed, expected, rtol=1e-4, atol=1e-2
+    if (
+        descriptor.get("filename") != "model.onnx"
+        or descriptor.get("object_key") != expected_key
+        or descriptor.get("content_type") != "application/octet-stream"
+        or not isinstance(descriptor.get("size_bytes"), int)
+        or descriptor["size_bytes"] <= 0
+        or not isinstance(descriptor.get("sha256"), str)
+        or not _SHA256.fullmatch(descriptor["sha256"])
     ):
-        raise ValueError("Model package golden parity failed")
+        raise ValueError("Model release model descriptor is invalid")
+    return metadata
 
 
-def validate_model_package(package_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    root = package_dir.resolve()
+def _validate_onnx(root: Path, metadata: dict[str, Any]) -> None:
+    path = root / "model.onnx"
+    onnx.checker.check_model(onnx.load(path))
+    session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    if len(session.get_inputs()) != 1 or len(session.get_outputs()) != 1:
+        raise ValueError("Model release ONNX must have exactly one input and one output")
+    expected_input = metadata["input"].get("name")
+    expected_output = metadata["output"].get("name")
+    if (
+        session.get_inputs()[0].name != expected_input
+        or session.get_outputs()[0].name != expected_output
+    ):
+        raise ValueError("Model release ONNX names differ from metadata")
+
+
+def validate_model_release(release_dir: Path) -> dict[str, Any]:
+    root = release_dir.resolve()
+    if not root.is_dir():
+        raise ValueError("Model release directory does not exist")
     actual = sorted(path.name for path in root.iterdir() if path.is_file())
-    if actual != sorted(REQUIRED_FILES):
-        raise ValueError("Model package files differ from the required contract")
-    manifest = _validate_manifest(root)
-    _json(root / "runtime_config.json")
-    _json(root / "metrics.json")
-    checksums = _parse_checksums(root / "checksums.sha256")
-    expected_checked = set(REQUIRED_FILES) - {"checksums.sha256"}
-    if set(checksums) != expected_checked:
-        raise ValueError("checksums.sha256 does not cover every package payload")
-    for filename, digest in checksums.items():
-        if _sha256_file(root / filename) != digest:
-            raise ValueError(f"Model package SHA-256 differs: {filename}")
-    _validate_onnx_and_golden(root)
-    files = [
-        {
-            "file_id": path.stem.replace("_", "-"),
-            "filename": path.name,
-            "size_bytes": path.stat().st_size,
-            "sha256": _sha256_file(path),
-            "content_type": (
-                "application/json"
-                if path.suffix == ".json"
-                else "application/octet-stream"
-            ),
-        }
-        for path in sorted(root.iterdir())
-        if path.is_file()
-    ]
-    logical = hashlib.sha256(
-        _json_bytes(
-            {
-                "manifest": manifest,
-                "files": [
-                    {key: entry[key] for key in ("filename", "size_bytes", "sha256")}
-                    for entry in files
-                ],
-            }
-        )
-    ).hexdigest()
-    package_manifest = {
-        **manifest,
-        "package_id": _package_id(manifest["model_code"], logical),
-        "logical_digest": logical,
-    }
-    return package_manifest, files
+    if actual != list(REQUIRED_FILES):
+        raise ValueError("Model release must contain exactly metadata.json and model.onnx")
+    metadata = _validate_metadata(root)
+    path = root / "model.onnx"
+    descriptor = metadata["model"]
+    if (
+        path.stat().st_size != descriptor["size_bytes"]
+        or _sha256_file(path) != descriptor["sha256"]
+    ):
+        raise ValueError("Model release ONNX differs from metadata")
+    _validate_onnx(root, metadata)
+    return metadata
 
 
-def _write_bundle(package_dir: Path, package_id: str, destination: Path) -> None:
-    with destination.open("wb") as raw:
-        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
-            with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive:
-                for filename in REQUIRED_FILES:
-                    path = package_dir / filename
-                    info = tarfile.TarInfo(f"{package_id}/{filename}")
-                    info.size = path.stat().st_size
-                    info.mode = 0o644
-                    info.mtime = 0
-                    with path.open("rb") as source:
-                        archive.addfile(info, source)
-
-
-def publish_model_package(
-    package_dir: Path,
+def publish_model_release(
+    release_dir: Path,
     *,
     progress: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     reporter = progress or NullProgressReporter()
-    with reporter.task("Validating the final ONNX model package"):
-        manifest, files = validate_model_package(package_dir)
+    with reporter.task("Validating the two-file ONNX model release"):
+        metadata = validate_model_release(release_dir)
     with reporter.task("Checking Google Cloud sign-in"):
         account = ensure_gcloud_login(interactive=True)
-    bucket = data_bucket()
-    package_id = manifest["package_id"]
-    prefix = f"{PACKAGE_PREFIX}/{package_id}"
-    with tempfile.TemporaryDirectory(prefix="imu-model-package-") as temporary:
-        root = Path(temporary)
-        bundle = root / "package.tar.gz"
-        _write_bundle(package_dir, package_id, bundle)
-        published_at = datetime.now(UTC).isoformat()
-        publication = {
-            "schema_version": PACKAGE_PUBLICATION_SCHEMA,
-            "package_id": package_id,
-            "created_at_utc": published_at,
-            "logical_digest": manifest["logical_digest"],
-            "manifest": manifest,
-            "bundle": {
-                "filename": bundle.name,
-                "size_bytes": bundle.stat().st_size,
-                "sha256": _sha256_file(bundle),
-            },
-            "files": [
-                {
-                    **entry,
-                    "object_key": f"{prefix}/files/{entry['filename']}",
-                }
-                for entry in files
-            ],
-        }
-        artifacts = [
-            {
-                "file_id": "bundle",
-                "object_key": f"{prefix}/package.tar.gz",
-                "size_bytes": publication["bundle"]["size_bytes"],
-                "sha256": publication["bundle"]["sha256"],
-                "content_type": "application/gzip",
-            },
-            *[
-                {
-                    key: entry[key]
-                    for key in (
-                        "file_id",
-                        "object_key",
-                        "size_bytes",
-                        "sha256",
-                        "content_type",
-                    )
-                }
-                for entry in publication["files"]
-            ],
-        ]
-        sources = {
-            "bundle": bundle,
-            **{
-                entry["file_id"]: package_dir / entry["filename"]
-                for entry in publication["files"]
-            },
-        }
-        with reporter.task("Uploading through the constrained team broker"):
-            completed = publish_model_artifacts(
-                publication_kind="package",
-                publication_id=package_id,
-                marker=publication,
-                artifacts=artifacts,
-                sources=sources,
-            )
-        if completed.get("marker_object") != f"{prefix}/publication.json":
-            raise ValueError("Upload broker completed an unexpected model package")
+    release_id = metadata["release_id"]
+    path = release_dir.resolve() / "model.onnx"
+    artifact = {"file_id": "model", **metadata["model"]}
+    with reporter.task("Uploading model.onnx and writing metadata.json last"):
+        completed = publish_model_artifacts(
+            publication_kind="model",
+            publication_id=release_id,
+            marker=metadata,
+            artifacts=[artifact],
+            sources={"model": path},
+        )
+    expected = f"{MODEL_RELEASE_PREFIX}/{release_id}/metadata.json"
+    if completed.get("marker_object") != expected:
+        raise ValueError("Upload broker completed an unexpected model release")
     return {
         "status": "PASS",
         "account": account,
-        "bucket": bucket,
-        "package_id": package_id,
-        "publication_object": f"{prefix}/publication.json",
-        "bundle_sha256": publication["bundle"]["sha256"],
+        "bucket": data_bucket(),
+        "release_id": release_id,
+        "metadata_object": expected,
+        "model_sha256": metadata["model"]["sha256"],
     }
 
 
-def verify_model_package(package_id: str) -> dict[str, Any]:
-    if not _IDENTIFIER.fullmatch(package_id):
-        raise ValueError("Invalid model package ID")
+def verify_model_release(release_id: str) -> dict[str, Any]:
+    if not _IDENTIFIER.fullmatch(release_id):
+        raise ValueError("Invalid model release ID")
     account = ensure_gcloud_login(interactive=False)
     bucket = data_bucket()
-    key = f"{PACKAGE_PREFIX}/{package_id}/publication.json"
+    key = f"{MODEL_RELEASE_PREFIX}/{release_id}/metadata.json"
     payload = _gcloud_cat(_object_uri(bucket, key), optional=False)
     assert payload is not None
-    publication = _read_json_bytes(payload, source=key)
+    metadata = _read_json_bytes(payload, source=key)
     if (
-        publication.get("schema_version") != PACKAGE_PUBLICATION_SCHEMA
-        or publication.get("package_id") != package_id
+        metadata.get("schema_version") != MODEL_RELEASE_SCHEMA
+        or metadata.get("contract_version") != MODEL_RELEASE_CONTRACT_VERSION
+        or metadata.get("release_id") != release_id
     ):
-        raise ValueError("Remote model package publication is invalid")
+        raise ValueError("Remote model release metadata is invalid")
     return {
         "status": "PASS",
         "account": account,
         "bucket": bucket,
-        "package_id": package_id,
-        "logical_digest": publication.get("logical_digest"),
+        "release_id": release_id,
+        "model_sha256": metadata.get("model", {}).get("sha256"),
     }
 
 
-def restore_published_model_package(
-    package_id: str, *, expected_generation: int
+def restore_model_release(
+    release_id: str, *, expected_generation: int
 ) -> dict[str, Any]:
-    if not _IDENTIFIER.fullmatch(package_id):
-        raise ValueError("Invalid model package ID")
+    if not _IDENTIFIER.fullmatch(release_id):
+        raise ValueError("Invalid model release ID")
     ensure_gcloud_login(interactive=False)
     return restore_model_publication(
-        "package", package_id, expected_generation=expected_generation
+        "model", release_id, expected_generation=expected_generation
     )
