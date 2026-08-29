@@ -177,7 +177,13 @@ def publish_model_release(
         account = ensure_gcloud_login(interactive=True)
     release_id = metadata["release_id"]
     path = release_dir.resolve() / "model.onnx"
-    artifact = {"file_id": "model", **metadata["model"]}
+    artifact = {
+        "file_id": "model",
+        **{
+            key: metadata["model"][key]
+            for key in ("object_key", "size_bytes", "sha256", "content_type")
+        },
+    }
     with reporter.task("Uploading model.onnx and writing metadata.json last"):
         completed = publish_model_artifacts(
             publication_kind="model",

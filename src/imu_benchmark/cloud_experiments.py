@@ -66,7 +66,15 @@ def _metadata(
         if descriptor["sha256"] != artifact["source"]["onnx_sha256"]:
             raise ValueError(f"ONNX catalog descriptor differs: {artifact_id}")
         file_id = f"onnx-{artifact_id}"
-        uploads.append({"file_id": file_id, **descriptor})
+        uploads.append(
+            {
+                "file_id": file_id,
+                **{
+                    key: descriptor[key]
+                    for key in ("object_key", "size_bytes", "sha256", "content_type")
+                },
+            }
+        )
         sources[file_id] = path
         artifacts.append({**artifact, "onnx": descriptor})
 
