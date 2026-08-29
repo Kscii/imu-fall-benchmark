@@ -18,6 +18,7 @@ from imu_benchmark.progress import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SHELL_LIBRARY = PROJECT_ROOT / "scripts/benchmark-shell-lib.sh"
+SETUP_SCRIPT = PROJECT_ROOT / "setup"
 
 
 def _shell_digest(repository: Path, function: str = "dependency_digest") -> str:
@@ -83,6 +84,22 @@ def test_compatible_legacy_environment_can_be_adopted_from_another_checkout(
         text=True,
     )
     assert completed.stdout.strip() == str(envs / "aaaa")
+
+
+def test_fresh_setup_accepts_an_empty_environment_root(tmp_path: Path) -> None:
+    (tmp_path / "envs").mkdir()
+    subprocess.run(
+        (
+            "bash",
+            "-c",
+            'source "$1"; WORK_ROOT="$2"; adopt_legacy_environment; '
+            'test ! -e "$(canonical_environment_path)"',
+            "fresh-setup-test",
+            str(SETUP_SCRIPT),
+            str(tmp_path),
+        ),
+        check=True,
+    )
 
 
 def test_plain_progress_is_line_oriented() -> None:

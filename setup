@@ -97,7 +97,7 @@ adopt_legacy_environment() {
   local canonical legacy temporary_link
   canonical="$(canonical_environment_path)"
   [[ -e "${canonical}" || -L "${canonical}" ]] && return
-  legacy="$(find_compatible_legacy_environment)" || return
+  legacy="$(find_compatible_legacy_environment)" || return 0
   temporary_link="${canonical}.tmp-$$"
   ln -s -- "${legacy}" "${temporary_link}"
   mv -T -- "${temporary_link}" "${canonical}"
@@ -285,4 +285,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
