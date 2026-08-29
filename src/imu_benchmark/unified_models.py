@@ -101,6 +101,7 @@ class CudaSequenceTrainer:
         random_seed: int,
         precision: str,
         execution_mode: str,
+        use_class_weight: bool,
         epoch_callback: Callable[[int, int, float, int], None] | None = None,
     ) -> None:
         if precision not in {"fp32", "bf16"}:
@@ -115,9 +116,11 @@ class CudaSequenceTrainer:
         self.random_seed = random_seed
         self.precision = precision
         self.execution_mode = execution_mode
+        self.use_class_weight = use_class_weight
         self.epoch_callback = epoch_callback
         self.model: Any | None = None
         self.best_epoch: int | None = None
+        self.training_history: list[dict[str, float | int]] = []
 
     @staticmethod
     def _positive_weight(labels: np.ndarray) -> float:
@@ -160,7 +163,9 @@ class CudaSequenceTrainer:
             weight_decay=float(self.params["weight_decay"]),
         )
         positive_weight = torch.tensor(
-            self._positive_weight(labels), dtype=torch.float32, device="cuda"
+            self._positive_weight(labels) if self.use_class_weight else 1.0,
+            dtype=torch.float32,
+            device="cuda",
         )
         return optimizer, torch.nn.BCEWithLogitsLoss(pos_weight=positive_weight)
 
@@ -239,6 +244,13 @@ class CudaSequenceTrainer:
                 )
             )
             best_loss, remaining, state = self._best(validation_loss, epoch, best_loss, remaining)
+            self.training_history.append(
+                {
+                    "epoch": epoch,
+                    "validation_loss": validation_loss,
+                    "patience_remaining": remaining,
+                }
+            )
             if self.epoch_callback is not None:
                 self.epoch_callback(epoch, self.max_epochs, validation_loss, remaining)
             if state is not None:

@@ -26,7 +26,7 @@ def test_contract_and_active_manifest_are_single_protocol_source(
         PROJECT_ROOT, snapshot_path=active_manifest_path
     )
     assert contract["contract_version"] == "imu_benchmark_contract_v2"
-    assert active["snapshot_version"] == "imu_25hz_snapshot_v1"
+    assert active["snapshot_version"] == "imu_25hz_snapshot_v2"
     assert contract["canonical_signal"]["sampling_rate_hz"] == 25
     assert contract["window"]["samples"] == 50
     assert contract["window"]["stride_seconds"] == 0.5

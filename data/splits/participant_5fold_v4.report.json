@@ -1,0 +1,100 @@
+{
+  "changed_existing_assignments": 0,
+  "csv_path": "participant_5fold_v4.csv",
+  "folds": {
+    "0": {
+      "adl_rows": 1085971,
+      "datasets": {
+        "cgu_bes": 3,
+        "ipqm_fall": 3,
+        "kfall": 7,
+        "sfu_ipml": 2,
+        "sisfall": 8,
+        "uci_455": 3,
+        "umafall": 4,
+        "univrfall": 5,
+        "upfall": 4
+      },
+      "events": 597,
+      "fall_sequences": 1902,
+      "participants": 39
+    },
+    "1": {
+      "adl_rows": 1021049,
+      "datasets": {
+        "cgu_bes": 3,
+        "ipqm_fall": 3,
+        "kfall": 7,
+        "sfu_ipml": 2,
+        "sisfall": 7,
+        "uci_455": 3,
+        "umafall": 4,
+        "univrfall": 6,
+        "upfall": 4
+      },
+      "events": 638,
+      "fall_sequences": 1879,
+      "participants": 39
+    },
+    "2": {
+      "adl_rows": 1028912,
+      "datasets": {
+        "cgu_bes": 3,
+        "ipqm_fall": 3,
+        "kfall": 6,
+        "sfu_ipml": 2,
+        "sisfall": 7,
+        "uci_455": 3,
+        "umafall": 4,
+        "univrfall": 6,
+        "upfall": 3
+      },
+      "events": 560,
+      "fall_sequences": 1860,
+      "participants": 37
+    },
+    "3": {
+      "adl_rows": 1023326,
+      "datasets": {
+        "cgu_bes": 3,
+        "ipqm_fall": 3,
+        "kfall": 6,
+        "sfu_ipml": 2,
+        "sisfall": 8,
+        "uci_455": 4,
+        "umafall": 4,
+        "univrfall": 6,
+        "upfall": 3
+      },
+      "events": 568,
+      "fall_sequences": 1966,
+      "participants": 39
+    },
+    "4": {
+      "adl_rows": 1119972,
+      "datasets": {
+        "cgu_bes": 3,
+        "ipqm_fall": 3,
+        "kfall": 6,
+        "sfu_ipml": 2,
+        "sisfall": 8,
+        "uci_455": 4,
+        "umafall": 3,
+        "univrfall": 6,
+        "upfall": 3
+      },
+      "events": 556,
+      "fall_sequences": 1987,
+      "participants": 38
+    }
+  },
+  "new_assignments": 0,
+  "new_participants": [],
+  "participants": 192,
+  "report_path": "participant_5fold_v4.report.json",
+  "schema_version": "imu_benchmark_split_proposal_v1",
+  "seed": 3888,
+  "status": "PASS",
+  "sticky_existing_assignments": 192,
+  "version": "participant_5fold_v4"
+}

@@ -1,0 +1,37 @@
+schema_version: 3
+id: formal_baseline_main_v1
+contract_path: configs/contracts/imu_benchmark_contract_v2.json
+snapshot_path: active.json
+data_view_path: configs/data_views/all_temporal_v1.yaml
+model_catalog_path: configs/models/fall_models_v1.yaml
+alarm_policy_path: configs/evaluation/alarm_policies_v1.yaml
+models:
+  - threshold_impact
+  - cuml_logistic_regression
+  - cuml_random_forest
+  - xgboost_cuda
+  - torch_1d_cnn
+  - torch_lstm
+  - torch_cnn_lstm
+folds: [0, 1, 2, 3, 4]
+seeds: [3888, 5171, 8438, 12011, 17027]
+seed_policy: deterministic_models_single_seed
+training_recipes:
+  - natural
+  - participant_class_balanced
+precision: fp32
+gpu_mode: auto
+max_epochs: 100
+patience: 12
+max_sequences_per_split: null
+max_windows_per_sequence: null
+cache_flush_windows: 16384
+bootstrap_replicates: 5000
+export_onnx: false
+data_quality_status: internal_formal_baseline
+known_limitations:
+  - This is an internal public-data baseline and is not product-validation evidence.
+  - Simulated public falls may not represent real older-adult falls or the final device.
+  - Recording-supervised public fall recordings are not treated as positive temporal windows.
+  - Team development recordings may enter training but never validation or test folds.
+  - Alarm-policy candidates are selected only from validation-fold Pareto fronts.

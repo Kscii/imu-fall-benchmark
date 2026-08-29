@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import os
+import pickle
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -13,14 +14,17 @@ import numpy as np
 import yaml
 
 from .configuration import PUBLIC_MODEL_IDS, public_config
-from .device import CudaUnavailable, GpuMemoryMonitor, NvidiaSmiMonitor
+from .device import CudaUnavailable, GpuMemoryMonitor, NvidiaSmiMonitor, require_cuda_modules
 from .evaluation import best_threshold
 from .metrics import (
+    alarm_policy_metrics,
     binary_classification_metrics,
+    pareto_alarm_policy_ids,
     subgroup_metrics,
     temporal_event_metrics,
 )
 from .models import release_gpu_memory
+from .onnx_export import export_and_validate_onnx
 from .performance import (
     PERFORMANCE_SCHEMA_VERSION,
     PhaseTimer,
@@ -30,6 +34,7 @@ from .performance import (
 )
 from .progress import NullProgressReporter, ProgressReporter
 from .sequence_models import threshold_impact_scores
+from .statistical_analysis import write_statistical_outputs
 from .unified_models import (
     CudaSequenceTrainer,
     feature_normalization,
@@ -44,8 +49,8 @@ from .window_cache import (
     prepare_unified_window_store,
 )
 
-ENGINE_SCHEMA_VERSION = 4
-JOB_CHECKPOINT_SCHEMA_VERSION = 1
+ENGINE_SCHEMA_VERSION = 5
+JOB_CHECKPOINT_SCHEMA_VERSION = 3
 TABULAR_MODELS = (
     "cuml_logistic_regression",
     "cuml_random_forest",
@@ -63,12 +68,13 @@ class Job:
     seed: int
     input_kind: str
     precision: str
+    training_recipe: str
 
     @property
     def key(self) -> str:
         return (
             f"{self.data_view_id}__{self.model_id}__fold_{self.fold}__"
-            f"seed_{self.seed}__{self.precision}"
+            f"seed_{self.seed}__recipe_{self.training_recipe}__{self.precision}"
         )
 
 
@@ -126,20 +132,37 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 def build_jobs(config: dict[str, Any]) -> list[Job]:
     catalog = config["model_catalog"]["models"]
     view = config["data_view"]
-    jobs = [
-        Job(
-            data_view_id=view["id"],
-            objective=view["objective"],
-            model_id=model_id,
-            fold=int(fold),
-            seed=int(seed),
-            input_kind=str(catalog[model_id]["input_kind"]),
-            precision=str(config["precision"]),
-        )
-        for fold in config["folds"]
-        for seed in config["seeds"]
-        for model_id in config["models"]
-    ]
+    first_seed = int(config["seeds"][0])
+    jobs = []
+    for fold in config["folds"]:
+        for model_id in config["models"]:
+            if model_id == "threshold_impact":
+                combinations = ((first_seed, "not_applicable"),)
+            else:
+                seeds = config["seeds"]
+                if (
+                    config["seed_policy"] == "deterministic_models_single_seed"
+                    and model_id == "cuml_logistic_regression"
+                ):
+                    seeds = [first_seed]
+                combinations = tuple(
+                    (int(seed), recipe)
+                    for recipe in config["training_recipes"]
+                    for seed in seeds
+                )
+            for seed, recipe in combinations:
+                jobs.append(
+                    Job(
+                        data_view_id=view["id"],
+                        objective=view["objective"],
+                        model_id=model_id,
+                        fold=int(fold),
+                        seed=seed,
+                        input_kind=str(catalog[model_id]["input_kind"]),
+                        precision=str(config["precision"]),
+                        training_recipe=recipe,
+                    )
+                )
     return sorted(
         jobs,
         key=lambda job: (
@@ -148,6 +171,7 @@ def build_jobs(config: dict[str, Any]) -> list[Job]:
             job.seed,
             job.input_kind,
             job.precision,
+            job.training_recipe,
             config["models"].index(job.model_id),
         ),
     )
@@ -169,6 +193,8 @@ def plan_experiment(config: dict[str, Any]) -> dict[str, Any]:
         "models": config["models"],
         "folds": config["folds"],
         "seeds": config["seeds"],
+        "training_recipes": config["training_recipes"],
+        "seed_policy": config["seed_policy"],
         "precision": config["precision"],
         "gpu_mode": config["gpu_mode"],
         "split_protocol": {
@@ -306,12 +332,25 @@ def split_indices(
     return result
 
 
-def _job_hash(config: dict[str, Any], cache_fingerprint: str, job: Job) -> str:
+def _source_fingerprint(source: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(source, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _job_hash(
+    config: dict[str, Any],
+    cache_fingerprint: str,
+    source_fingerprint: str,
+    job: Job,
+) -> str:
     payload = {
+        "engine_schema_version": ENGINE_SCHEMA_VERSION,
         "job_checkpoint_schema_version": JOB_CHECKPOINT_SCHEMA_VERSION,
         "performance_schema_version": PERFORMANCE_SCHEMA_VERSION,
         "resolved_config_sha256": config["resolved_config_sha256"],
         "cache_fingerprint": cache_fingerprint,
+        "source_fingerprint": source_fingerprint,
         "job": asdict(job),
     }
     return hashlib.sha256(
@@ -319,14 +358,181 @@ def _job_hash(config: dict[str, Any], cache_fingerprint: str, job: Job) -> str:
     ).hexdigest()
 
 
+def training_recipe_indices(
+    store: UnifiedWindowStore,
+    indices: np.ndarray,
+    recipe: str,
+    seed: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    selected = np.asarray(indices, dtype=np.int64)
+    labels = store.temporal_label[selected]
+    if recipe in {"natural", "legacy_class_weighted"}:
+        return selected, {
+            "recipe": recipe,
+            "windows": len(selected),
+            "unique_windows": len(selected),
+            "positive_windows": int(np.count_nonzero(labels == 1)),
+            "negative_windows": int(np.count_nonzero(labels == 0)),
+        }
+    if recipe != "participant_class_balanced":
+        raise ValueError(f"Unknown training recipe: {recipe}")
+    generator = np.random.default_rng(seed)
+    sequence_ids = store.sequence_index[selected]
+    datasets = store.dataset_id[sequence_ids]
+    participants = store.participant_id[sequence_ids]
+    keys = np.asarray(
+        [
+            f"{dataset}\0{participant}"
+            for dataset, participant in zip(datasets, participants, strict=True)
+        ],
+        dtype=object,
+    )
+    targets = {0: len(selected) // 2, 1: len(selected) - len(selected) // 2}
+    parts: list[np.ndarray] = []
+    participant_counts: dict[str, int] = {}
+    for label, target in targets.items():
+        class_indices = selected[labels == label]
+        class_keys = keys[labels == label]
+        unique_keys = np.unique(class_keys)
+        if not len(unique_keys):
+            raise ValueError("Balanced training recipe requires both classes")
+        counts = np.full(len(unique_keys), target // len(unique_keys), dtype=np.int64)
+        remainder = target % len(unique_keys)
+        if remainder:
+            counts[generator.permutation(len(unique_keys))[:remainder]] += 1
+        for participant_key, count in zip(unique_keys, counts, strict=True):
+            candidates = class_indices[class_keys == participant_key]
+            sampled = generator.choice(candidates, size=int(count), replace=True)
+            parts.append(np.asarray(sampled, dtype=np.int64))
+            participant_counts[f"{label}:{participant_key}"] = int(count)
+    balanced = np.concatenate(parts)
+    generator.shuffle(balanced)
+    digest = hashlib.sha256(np.asarray(balanced, dtype="<i8").tobytes()).hexdigest()
+    balanced_labels = store.temporal_label[balanced]
+    return balanced, {
+        "recipe": recipe,
+        "windows": len(balanced),
+        "unique_windows": len(np.unique(balanced)),
+        "positive_windows": int(np.count_nonzero(balanced_labels == 1)),
+        "negative_windows": int(np.count_nonzero(balanced_labels == 0)),
+        "participant_class_groups": len(participant_counts),
+        "sample_index_sha256": digest,
+    }
+
+
 def _checkpoint_path(run_dir: Path, job: Job) -> Path:
     digest = hashlib.sha256(job.key.encode()).hexdigest()[:16]
     return run_dir / "jobs" / f"{digest}.npz"
 
 
+def _model_artifact_dir(run_dir: Path, job: Job) -> Path:
+    digest = hashlib.sha256(job.key.encode()).hexdigest()[:16]
+    return run_dir / "models" / digest
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _save_native_model(
+    run_dir: Path,
+    job: Job,
+    adapter: Any | None,
+    spec: dict[str, Any],
+    normalization: dict[str, Any],
+) -> dict[str, Any]:
+    artifact_dir = _model_artifact_dir(run_dir, job)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    if job.model_id == "threshold_impact":
+        model_path = artifact_dir / "threshold.json"
+        _atomic_json(model_path, {"model_id": job.model_id, "params": spec["params"]})
+        native_format = "json_rule"
+    elif job.model_id in {"cuml_logistic_regression", "cuml_random_forest"}:
+        model_path = artifact_dir / "model.pkl"
+        temporary = model_path.with_suffix(f".pkl.tmp-{os.getpid()}")
+        with temporary.open("wb") as destination:
+            pickle.dump(
+                {
+                    "estimator": adapter.estimator,
+                    "calibrator": getattr(adapter, "calibrator", None),
+                },
+                destination,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+        temporary.replace(model_path)
+        native_format = "cuml_pickle"
+    elif job.model_id == "xgboost_cuda":
+        model_path = artifact_dir / "model.ubj"
+        temporary = artifact_dir / f"model.tmp-{os.getpid()}.ubj"
+        adapter.estimator.save_model(str(temporary))
+        temporary.replace(model_path)
+        native_format = "xgboost_ubj"
+    elif job.model_id in SEQUENCE_MODELS:
+        _, _, torch, _ = require_cuda_modules()
+        model_path = artifact_dir / "model.pt"
+        temporary = artifact_dir / f"model.tmp-{os.getpid()}.pt"
+        torch.save(adapter.model.state_dict(), temporary)
+        temporary.replace(model_path)
+        native_format = "torch_state_dict"
+    else:
+        raise ValueError(f"Unsupported native model format: {job.model_id}")
+    normalization_path = None
+    if normalization["enabled"]:
+        normalization_path = artifact_dir / "normalization.npz"
+        temporary = artifact_dir / f"normalization.tmp-{os.getpid()}.npz"
+        with temporary.open("wb") as destination:
+            np.savez_compressed(
+                destination,
+                mean=np.asarray(normalization["mean"], dtype=np.float32),
+                scale=np.asarray(normalization["scale"], dtype=np.float32),
+            )
+        temporary.replace(normalization_path)
+    history = getattr(adapter, "training_history", []) if adapter is not None else []
+    history_path = artifact_dir / "training_history.json"
+    _atomic_json(
+        history_path,
+        {"epochs": history, "best_epoch": getattr(adapter, "best_epoch", None)},
+    )
+    model_spec_path = artifact_dir / "model_spec.json"
+    _atomic_json(
+        model_spec_path,
+        {
+            "job": asdict(job),
+            "backend": spec["backend"],
+            "input_kind": spec["input_kind"],
+            "input_shape": [None, 50, 6] if spec["input_kind"] == "raw" else [None, 158],
+            "params": spec["params"],
+            "normalization": normalization,
+            "native_format": native_format,
+        },
+    )
+    def relative(path: Path) -> str:
+        return str(path.relative_to(run_dir))
+    return {
+        "directory": relative(artifact_dir),
+        "native_model": {
+            "path": relative(model_path),
+            "format": native_format,
+            "sha256": _sha256_file(model_path),
+            "size_bytes": model_path.stat().st_size,
+        },
+        "model_spec_path": relative(model_spec_path),
+        "training_history_path": relative(history_path),
+        "normalization_path": (
+            None if normalization_path is None else relative(normalization_path)
+        ),
+    }
+
+
 def _write_checkpoint(
     path: Path,
     metadata: dict[str, Any],
+    window_index: np.ndarray,
+    label: np.ndarray,
     fall_score: np.ndarray,
     external_fall_score: np.ndarray,
 ) -> None:
@@ -336,6 +542,8 @@ def _write_checkpoint(
         np.savez_compressed(
             destination,
             metadata_json=np.asarray(json.dumps(metadata, sort_keys=True, allow_nan=True)),
+            window_index=np.asarray(window_index, dtype=np.int64),
+            label=np.asarray(label, dtype=np.int8),
             fall_score=np.asarray(fall_score, dtype=np.float32),
             external_fall_score=np.asarray(external_fall_score, dtype=np.float32),
         )
@@ -344,11 +552,53 @@ def _write_checkpoint(
 
 def _load_checkpoint(path: Path) -> dict[str, Any]:
     with np.load(path, allow_pickle=False) as archive:
+        # Checkpoint schema 1 did not store the OOF window indices and labels.
+        # Load it far enough to compare the job hash, then recompute it under
+        # the current schema instead of failing before the compatibility check.
+        window_index = (
+            np.asarray(archive["window_index"], dtype=np.int64)
+            if "window_index" in archive
+            else np.empty(0, dtype=np.int64)
+        )
+        label = (
+            np.asarray(archive["label"], dtype=np.int8)
+            if "label" in archive
+            else np.empty(0, dtype=np.int8)
+        )
         return {
             "metadata": json.loads(str(archive["metadata_json"])),
+            "window_index": window_index,
+            "label": label,
             "fall_score": np.asarray(archive["fall_score"], dtype=np.float64),
             "external_fall_score": np.asarray(archive["external_fall_score"], dtype=np.float64),
         }
+
+
+def _artifacts_valid(run_dir: Path, metadata: dict[str, Any]) -> bool:
+    artifacts = metadata.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return False
+    native = artifacts.get("native_model")
+    if not isinstance(native, dict) or not isinstance(native.get("path"), str):
+        return False
+    path = run_dir / native["path"]
+    native_valid = (
+        path.is_file()
+        and path.stat().st_size == native.get("size_bytes")
+        and _sha256_file(path) == native.get("sha256")
+    )
+    onnx = artifacts.get("onnx")
+    if onnx is None:
+        return native_valid
+    if not isinstance(onnx, dict) or not isinstance(onnx.get("path"), str):
+        return False
+    onnx_path = run_dir / onnx["path"]
+    return (
+        native_valid
+        and onnx_path.is_file()
+        and onnx_path.stat().st_size == onnx.get("size_bytes")
+        and _sha256_file(onnx_path) == onnx.get("sha256")
+    )
 
 
 def _is_cuda_oom(error: BaseException) -> bool:
@@ -362,6 +612,7 @@ def _model_scores(
     split: FoldIndices,
     config: dict[str, Any],
     job: Job,
+    run_dir: Path,
     phases: PhaseTimer,
     prepared_cache: dict[tuple[Any, ...], dict[str, Any]],
     progress: ProgressReporter,
@@ -375,6 +626,31 @@ def _model_scores(
         with phases.track("test_inference_seconds"):
             test = threshold_impact_scores(raw[split.test])
         external = np.empty(0, dtype=np.float64)
+        normalization = {"enabled": False, "mean": None, "scale": None}
+        artifacts = _save_native_model(run_dir, job, None, spec, normalization)
+        if config["export_onnx"]:
+            onnx_path = _model_artifact_dir(run_dir, job) / "model.onnx"
+            additional_splits = (
+                {"test": (raw[split.test], test)}
+                if "test" in config["onnx_parity_splits"]
+                else None
+            )
+            with phases.track("onnx_export_and_parity_seconds"):
+                onnx_metadata = export_and_validate_onnx(
+                    None,
+                    job.model_id,
+                    raw[split.validation],
+                    validation,
+                    onnx_path,
+                    additional_splits=additional_splits,
+                    batch_size=int(config["onnx_parity_batch_size"]),
+                    max_samples=config["onnx_parity_max_samples"],
+                    provider=str(config["onnx_runtime_provider"]),
+                    rtol=float(config["onnx_parity_rtol"]),
+                    atol=float(config["onnx_parity_atol"]),
+                )
+            onnx_metadata["path"] = str(onnx_path.relative_to(run_dir))
+            artifacts["onnx"] = onnx_metadata
         return (
             validation,
             test,
@@ -390,21 +666,36 @@ def _model_scores(
                 },
                 "fallback": None,
                 "optimization": None,
+                "training_recipe": {"recipe": "not_applicable"},
+                "normalization": normalization,
+                "artifacts": artifacts,
             },
         )
 
     already_standardized = bool(spec["standardize"])
+    train_indices, recipe_metadata = training_recipe_indices(
+        store,
+        split.train,
+        job.training_recipe,
+        job.seed + job.fold * 10_000,
+    )
     context_key = (
         job.objective,
         job.fold,
         job.seed,
         job.input_kind,
         already_standardized,
+        job.training_recipe,
     )
     if context_key not in prepared_cache:
+        # A formal run visits many folds, seeds, input kinds, and recipes. Keep
+        # only the two most recent materialized contexts so the host does not
+        # retain every full training array for the duration of the 330 jobs.
+        while len(prepared_cache) >= 2:
+            prepared_cache.pop(next(iter(prepared_cache)))
         values = arrays[job.input_kind]
         with phases.track("fold_array_selection_seconds"):
-            train_values = values[split.train]
+            train_values = values[train_indices]
             validation_values = values[split.validation]
             test_values = values[split.test]
             external_values = values[:0]
@@ -417,11 +708,18 @@ def _model_scores(
                 train_values = normalize(train_values, mean, scale)
                 validation_values = normalize(validation_values, mean, scale)
                 test_values = normalize(test_values, mean, scale)
+            else:
+                mean = None
+                scale = None
         prepared_cache[context_key] = {
             "train": train_values,
             "validation": validation_values,
             "test": test_values,
             "external": external_values,
+            "train_indices": train_indices,
+            "training_recipe": recipe_metadata,
+            "normalization_mean": mean,
+            "normalization_scale": scale,
             "decision": select_execution_mode(
                 str(config["gpu_mode"]),
                 (train_values, validation_values, test_values, external_values),
@@ -432,6 +730,7 @@ def _model_scores(
     validation_values = prepared["validation"]
     test_values = prepared["test"]
     external_values = prepared["external"]
+    train_indices = prepared["train_indices"]
     decision = prepared["decision"]
     mode = decision.effective_mode
     fallback: dict[str, Any] | None = None
@@ -448,7 +747,7 @@ def _model_scores(
                     params,
                     random_seed=job.seed,
                     train=train_values,
-                    train_labels=store.temporal_label[split.train],
+                    train_labels=store.temporal_label[train_indices],
                     validation=validation_values,
                     validation_labels=store.temporal_label[split.validation],
                     already_standardized=already_standardized,
@@ -486,12 +785,13 @@ def _model_scores(
                 random_seed=job.seed,
                 precision=job.precision,
                 execution_mode=effective_mode,
+                use_class_weight=job.training_recipe == "legacy_class_weighted",
                 epoch_callback=on_epoch,
             )
             with phases.track("model_fit_seconds"):
                 trainer.fit_supervised(
                     train_values,
-                    store.temporal_label[split.train],
+                    store.temporal_label[train_indices],
                     validation_values,
                     store.temporal_label[split.validation],
                 )
@@ -516,6 +816,43 @@ def _model_scores(
         }
         mode = "streaming"
         adapter, validation, test, external = execute(mode)
+    normalization = {
+        "enabled": already_standardized,
+        "mean": (
+            None
+            if prepared["normalization_mean"] is None
+            else prepared["normalization_mean"].tolist()
+        ),
+        "scale": (
+            None
+            if prepared["normalization_scale"] is None
+            else prepared["normalization_scale"].tolist()
+        ),
+    }
+    artifacts = _save_native_model(run_dir, job, adapter, spec, normalization)
+    if config["export_onnx"]:
+        onnx_path = _model_artifact_dir(run_dir, job) / "model.onnx"
+        additional_splits = (
+            {"test": (test_values, test)}
+            if "test" in config["onnx_parity_splits"]
+            else None
+        )
+        with phases.track("onnx_export_and_parity_seconds"):
+            onnx_metadata = export_and_validate_onnx(
+                adapter,
+                job.model_id,
+                validation_values,
+                validation,
+                onnx_path,
+                additional_splits=additional_splits,
+                batch_size=int(config["onnx_parity_batch_size"]),
+                max_samples=config["onnx_parity_max_samples"],
+                provider=str(config["onnx_runtime_provider"]),
+                rtol=float(config["onnx_parity_rtol"]),
+                atol=float(config["onnx_parity_atol"]),
+            )
+        onnx_metadata["path"] = str(onnx_path.relative_to(run_dir))
+        artifacts["onnx"] = onnx_metadata
     metadata = {
         "strict_cuda_verified": True,
         "best_epoch": getattr(adapter, "best_epoch", None),
@@ -527,6 +864,9 @@ def _model_scores(
             if hasattr(adapter, "optimization_metadata")
             else None
         ),
+        "training_recipe": prepared["training_recipe"],
+        "normalization": normalization,
+        "artifacts": artifacts,
     }
     return validation, test, external, metadata
 
@@ -558,6 +898,41 @@ def _evaluate(
     threshold, validation_bacc, validation_mcc = best_threshold(
         validation_labels, validation_scores
     )
+    alarm_evaluation = None
+    if "alarm_policy" in config:
+        policies = config["alarm_policy"]["policies"]
+        validation_alarm = [
+            alarm_policy_metrics(
+                store,
+                split.validation,
+                validation_scores,
+                threshold,
+                policy,
+            )
+            for policy in policies
+        ]
+        pareto_ids = pareto_alarm_policy_ids(validation_alarm)
+        reference_id = config["alarm_policy"]["reference_policy"]
+        test_alarm = []
+        for policy in policies:
+            row = alarm_policy_metrics(
+                store,
+                split.test,
+                test_scores,
+                threshold,
+                policy,
+                sequence_scope=test_sequence_scope,
+            )
+            row["validation_pareto"] = policy["id"] in pareto_ids
+            row["reference_policy"] = policy["id"] == reference_id
+            test_alarm.append(row)
+        alarm_evaluation = {
+            "selection_scope": "validation_only",
+            "validation_pareto_policy_ids": pareto_ids,
+            "reference_policy_id": reference_id,
+            "validation_metrics": validation_alarm,
+            "test_metrics": test_alarm,
+        }
     return {
         "selected_threshold": threshold,
         "threshold_selection": "maximum_validation_balanced_accuracy",
@@ -574,6 +949,7 @@ def _evaluate(
         "subgroup_metrics": subgroup_metrics(store, split.test, test_scores, threshold),
         "external_metrics": None,
         "external_event_metrics": None,
+        "alarm_evaluation": alarm_evaluation,
     }
 
 
@@ -589,16 +965,25 @@ def _run_job(
     split_cache: dict[tuple[str, int, int], FoldIndices],
     prepared_cache: dict[tuple[Any, ...], dict[str, Any]],
     progress: ProgressReporter,
+    source_fingerprint: str,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     process_started = process_snapshot()
     invocation = PhaseTimer()
-    expected_hash = _job_hash(config, str(store.manifest["data_split_fingerprint"]), job)
+    expected_hash = _job_hash(
+        config,
+        str(store.manifest["data_split_fingerprint"]),
+        source_fingerprint,
+        job,
+    )
     checkpoint = _checkpoint_path(run_dir, job)
     if resume and checkpoint.exists():
         with invocation.track("checkpoint_read_seconds"):
             cached = _load_checkpoint(checkpoint)
-        if cached["metadata"].get("job_hash") == expected_hash:
+        if (
+            cached["metadata"].get("job_hash") == expected_hash
+            and _artifacts_valid(run_dir, cached["metadata"])
+        ):
             stopped = time.perf_counter()
             return {
                 "status": "cached",
@@ -616,7 +1001,12 @@ def _run_job(
     invocation_result: dict[str, Any] = {}
     try:
         with phases.track("split_selection_seconds"):
-            split_key = (job.objective, job.fold, job.seed)
+            # Full-data splits do not depend on the model seed. Capped smoke
+            # splits remain seed-specific because participant sampling is random.
+            split_seed = (
+                job.seed if config["max_sequences_per_split"] is not None else 0
+            )
+            split_key = (job.objective, job.fold, split_seed)
             if split_key not in split_cache:
                 split_cache[split_key] = split_indices(store, config, job.fold, job.seed)
             split = split_cache[split_key]
@@ -626,6 +1016,7 @@ def _run_job(
             split=split,
             config=config,
             job=job,
+            run_dir=run_dir,
             phases=phases,
             prepared_cache=prepared_cache,
             progress=progress,
@@ -671,7 +1062,14 @@ def _run_job(
             },
         }
         with invocation.track("checkpoint_write_seconds"):
-            _write_checkpoint(checkpoint, metadata, test_scores, external_scores)
+            _write_checkpoint(
+                checkpoint,
+                metadata,
+                split.test,
+                store.temporal_label[split.test],
+                test_scores,
+                external_scores,
+            )
         return {
             "status": "computed",
             "path": str(checkpoint),
@@ -709,6 +1107,7 @@ def _result_rows(results: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], .
             "model_id": job["model_id"],
             "fold": job["fold"],
             "seed": job["seed"],
+            "training_recipe": job.get("training_recipe", "legacy_unknown"),
             "compute_precision": job["precision"],
             "threshold": metadata["selected_threshold"],
         }
@@ -725,12 +1124,77 @@ def _result_rows(results: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], .
     return metric_rows, event_rows, subgroup_rows, external_rows
 
 
+def _alarm_result_rows(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for result in results:
+        metadata = result["metadata"]
+        evaluation = metadata.get("alarm_evaluation")
+        if evaluation is None:
+            continue
+        job = metadata["job"]
+        base = {
+            "data_view": job["data_view_id"],
+            "model_id": job["model_id"],
+            "training_recipe": job.get("training_recipe", "legacy_unknown"),
+            "fold": job["fold"],
+            "seed": job["seed"],
+            "threshold": metadata["selected_threshold"],
+        }
+        rows.extend({**base, **row} for row in evaluation["test_metrics"])
+    return rows
+
+
+def _onnx_result_rows(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for result in results:
+        metadata = result["metadata"]
+        onnx = metadata.get("artifacts", {}).get("onnx")
+        if onnx is None:
+            continue
+        job = metadata["job"]
+        timing = onnx["timing"]
+        for split_name, parity in onnx["parity_splits"].items():
+            rows.append(
+                {
+                    "data_view": job["data_view_id"],
+                    "model_id": job["model_id"],
+                    "training_recipe": job.get(
+                        "training_recipe", "legacy_unknown"
+                    ),
+                    "fold": job["fold"],
+                    "seed": job["seed"],
+                    "split": split_name,
+                    "samples": parity["samples"],
+                    "batches": parity["batches"],
+                    "batch_size": onnx["batch_size"],
+                    "relative_tolerance": onnx["relative_tolerance"],
+                    "absolute_tolerance": onnx["absolute_tolerance"],
+                    "maximum_absolute_error": parity[
+                        "maximum_absolute_error"
+                    ],
+                    "mean_absolute_error": parity["mean_absolute_error"],
+                    "p99_absolute_error": parity["p99_absolute_error"],
+                    "conversion_seconds": timing["conversion_seconds"],
+                    "runtime_inference_seconds": timing[
+                        "runtime_inference_seconds"
+                    ],
+                    "comparison_seconds": timing["comparison_seconds"],
+                    "onnx_sha256": onnx["sha256"],
+                }
+            )
+    return rows
+
+
 def _write_report(run_dir: Path, summary: dict[str, Any], results: list[dict[str, Any]]) -> None:
     metric_rows, event_rows, subgroup_rows, external_rows = _result_rows(results)
+    alarm_rows = _alarm_result_rows(results)
+    onnx_rows = _onnx_result_rows(results)
     _write_csv(run_dir / "metrics.csv", metric_rows)
     _write_csv(run_dir / "event_metrics.csv", event_rows)
     _write_csv(run_dir / "subgroup_metrics.csv", subgroup_rows)
     _write_csv(run_dir / "external_metrics.csv", external_rows)
+    _write_csv(run_dir / "alarm_metrics.csv", alarm_rows)
+    _write_csv(run_dir / "onnx_parity.csv", onnx_rows)
     lines = [
         f"# Experiment report: {summary['experiment_id']}",
         "",
@@ -747,18 +1211,40 @@ def _write_report(run_dir: Path, summary: dict[str, Any], results: list[dict[str
         "",
         "## Test metrics",
         "",
-        "| Model | Fold | Seed | BAcc | Sensitivity | Specificity | F1 | MCC | AUROC | AUPRC |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Model | Recipe | Fold | Seed | BAcc | Sensitivity | Specificity | "
+        "F1 | MCC | AUROC | AUPRC |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in metric_rows:
         lines.append(
-            f"| {row['model_id']} | {row['fold']} | {row['seed']} | "
+            f"| {row['model_id']} | {row['training_recipe']} | "
+            f"{row['fold']} | {row['seed']} | "
             f"{row['balanced_accuracy']:.4f} | {row['sensitivity']:.4f} | "
             f"{row['specificity']:.4f} | {row['f1']:.4f} | {row['mcc']:.4f} | "
             f"{row['auroc']:.4f} | {row['auprc']:.4f} |"
         )
     if not metric_rows:
         lines.append("No completed jobs are available.")
+    if onnx_rows:
+        samples = sum(int(row["samples"]) for row in onnx_rows)
+        maximum_error = max(
+            float(row["maximum_absolute_error"]) for row in onnx_rows
+        )
+        relative_tolerance = float(onnx_rows[0]["relative_tolerance"])
+        absolute_tolerance = float(onnx_rows[0]["absolute_tolerance"])
+        lines.extend(
+            [
+                "",
+                "## ONNX parity",
+                "",
+                f"- Validated split rows: {len(onnx_rows)}",
+                f"- Native/ONNX score comparisons: {samples}",
+                f"- Maximum absolute error: {maximum_error:.8g}",
+                f"- Acceptance tolerance: rtol={relative_tolerance:.8g}, "
+                f"atol={absolute_tolerance:.8g}",
+                "- Full details: `onnx_parity.csv`",
+            ]
+        )
     lines.extend(["", "## Known limitations", ""])
     lines.extend(f"- {item}" for item in summary["known_limitations"])
     lines.extend(
@@ -774,9 +1260,15 @@ def _write_report(run_dir: Path, summary: dict[str, Any], results: list[dict[str
     (run_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _run_id(config: dict[str, Any], cache_fingerprint: str) -> str:
+def _run_id(
+    config: dict[str, Any], cache_fingerprint: str, source_fingerprint: str
+) -> str:
     digest = hashlib.sha256(
-        f"{config['resolved_config_sha256']}:{cache_fingerprint}".encode()
+        (
+            f"{ENGINE_SCHEMA_VERSION}:{JOB_CHECKPOINT_SCHEMA_VERSION}:"
+            f"{config['resolved_config_sha256']}:{cache_fingerprint}:"
+            f"{source_fingerprint}"
+        ).encode()
     ).hexdigest()[:12]
     return f"{config['id']}-{digest}"
 
@@ -794,6 +1286,12 @@ def run_experiment(
     progress: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     reporter = progress or NullProgressReporter()
+    is_formal = str(config["data_quality_status"]).startswith("internal_")
+    if is_formal and (source.get("kind") == "unknown" or source.get("dirty") is not False):
+        raise ValueError(
+            "Formal experiments require a clean Git commit or immutable source snapshot"
+        )
+    source_fingerprint = _source_fingerprint(source)
     invocation_started = time.perf_counter()
     process_started = process_snapshot()
     phases = PhaseTimer()
@@ -807,7 +1305,11 @@ def run_experiment(
     with phases.track("store_metadata_load_seconds"):
         with reporter.task("Loading cached window metadata"):
             store = load_unified_window_store(cache_path)
-    run_id = _run_id(config, str(store.manifest["data_split_fingerprint"]))
+    run_id = _run_id(
+        config,
+        str(store.manifest["data_split_fingerprint"]),
+        source_fingerprint,
+    )
     run_dir = runs_root / run_id
     event_path = run_dir / "events.jsonl"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -868,6 +1370,7 @@ def run_experiment(
                             split_cache=split_cache,
                             prepared_cache=prepared_cache,
                             progress=reporter,
+                            source_fingerprint=source_fingerprint,
                         )
                     except Exception as error:
                         result = {
@@ -904,6 +1407,9 @@ def run_experiment(
         "cached_jobs_this_invocation": sum(result["status"] == "cached" for result in results),
         "failures": failures,
         "data_view_id": config["data_view"]["id"],
+        "base_snapshot_id": config["snapshot"]["base_snapshot_id"],
+        "snapshot_sha256": config["snapshot_sha256"],
+        "resolved_config_sha256": config["resolved_config_sha256"],
         "research_only": config["data_view"]["research_only"],
         "data_quality_status": config["data_quality_status"],
         "precision": config["precision"],
@@ -916,6 +1422,25 @@ def run_experiment(
     }
     with phases.track("report_generation_seconds"):
         with reporter.task("Writing reports and result artefacts"):
+            statistical_analysis = (
+                None
+                if failures
+                else write_statistical_outputs(
+                    run_dir,
+                    store,
+                    config,
+                    results,
+                )
+            )
+            summary["statistical_analysis"] = statistical_analysis
+            if (
+                statistical_analysis is not None
+                and statistical_analysis["status"] != "PASS"
+            ):
+                summary["status"] = "PARTIAL"
+                summary["warnings"].append(
+                    "Statistical outputs contain incomplete model/recipe groups."
+                )
             _write_report(run_dir, summary, results)
     summary["elapsed_seconds"] = time.perf_counter() - invocation_started
     performance = build_performance_report(

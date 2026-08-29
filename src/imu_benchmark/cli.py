@@ -9,7 +9,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from .cloud_data import data_status, publish_base, pull_data
+from .cloud_data import BASE_MANIFEST_PATH, activate_base, data_status, publish_base, pull_data
+from .cloud_results import publish_result, pull_result, verify_result
 from .configuration import load_experiment
 from .dataset import validate_data
 from .device import CudaUnavailable
@@ -28,6 +29,7 @@ from .runtime import (
     resolve_work_paths,
     source_provenance,
 )
+from .splits import propose_from_active
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SMOKE_CONFIG = PROJECT_ROOT / "configs/experiments/temporal_smoke_v1.yaml"
@@ -175,17 +177,51 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     data = commands.add_parser("data", help="Pull or inspect immutable GCS datasets")
     data_commands = data.add_subparsers(dest="data_command", required=True)
-    data_commands.add_parser("pull", help="Install current base and optional team snapshots")
+    pull = data_commands.add_parser(
+        "pull", help="Install current or explicitly named immutable snapshots"
+    )
+    pull.add_argument("--base-snapshot")
+    pull.add_argument("--team-snapshot")
+    pull.add_argument("--no-team", action="store_true")
     data_commands.add_parser("status", help="Compare local active data with remote current")
     publish = data_commands.add_parser(
-        "publish-base", help="Publish the reviewed public 25 Hz base snapshot"
+        "publish-base", help="Stage a reviewed immutable base snapshot without activating it"
     )
     publish.add_argument("--source-dir", type=Path, required=True)
+    publish.add_argument("--split-dir", type=Path, default=PROJECT_ROOT / "data/splits")
+    publish.add_argument("--manifest", type=Path, default=PROJECT_ROOT / BASE_MANIFEST_PATH)
+    activate = data_commands.add_parser(
+        "activate-base", help="Switch current.json to an already staged base snapshot"
+    )
+    activate.add_argument(
+        "--manifest", type=Path, default=PROJECT_ROOT / BASE_MANIFEST_PATH
+    )
+    activate.add_argument("--expected-current", required=True)
+    results = commands.add_parser(
+        "results", help="Publish, pull, or verify immutable benchmark results"
+    )
+    result_commands = results.add_subparsers(dest="results_command", required=True)
+    for action, help_text in (
+        ("publish", "Publish one completed temporal-core run"),
+        ("pull", "Download and validate one immutable result bundle"),
+        ("verify", "Verify one remote result bundle and optional local run"),
+    ):
+        result_command = result_commands.add_parser(action, help=help_text)
+        result_command.add_argument("run_id")
+    split = commands.add_parser("split", help="Propose sticky participant folds")
+    split_commands = split.add_subparsers(dest="split_command", required=True)
+    propose = split_commands.add_parser(
+        "propose", help="Keep existing folds and assign only new public participants"
+    )
+    propose.add_argument("--version", required=True)
+    propose.add_argument("--output-dir", type=Path)
     doctor = commands.add_parser("doctor", help="Verify WSL2, CUDA, and public model backends")
     doctor.add_argument("config", nargs="?", type=Path, default=DEFAULT_SMOKE_CONFIG)
     commands.add_parser("validate-data", help="Verify HDF5 v3.1 data, hashes, and folds")
     commands.add_parser("test", help="Run the repository Ruff and pytest checks")
-    commands.add_parser("smoke", help="Run the default seven-model KFall FP32 smoke config")
+    commands.add_parser(
+        "smoke", help="Run the default seven-model temporal FP32 smoke config"
+    )
     plan = commands.add_parser("plan", help="Resolve a YAML experiment without training")
     plan.add_argument("config", type=Path)
     run = commands.add_parser("run", help="Run a versioned YAML experiment")
@@ -209,11 +245,32 @@ def _dispatch(args: argparse.Namespace, reporter: ProgressReporter) -> dict[str,
         return _doctor_result(_config(args.config, paths), paths, reporter)
     if args.command == "data":
         if args.data_command == "pull":
-            return pull_data(PROJECT_ROOT, paths.data, progress=reporter)
+            if args.no_team and args.team_snapshot is not None:
+                raise ValueError("--no-team and --team-snapshot cannot be used together")
+            return pull_data(
+                PROJECT_ROOT,
+                paths.data,
+                base_snapshot_id=args.base_snapshot,
+                team_snapshot_id=args.team_snapshot,
+                include_team=not args.no_team,
+                progress=reporter,
+            )
         if args.data_command == "status":
             return data_status(PROJECT_ROOT, paths.data, progress=reporter)
         if args.data_command == "publish-base":
-            return publish_base(PROJECT_ROOT, args.source_dir.resolve(), progress=reporter)
+            return publish_base(
+                PROJECT_ROOT,
+                args.source_dir.resolve(),
+                manifest_path=args.manifest.resolve(),
+                split_dir=args.split_dir.resolve(),
+                progress=reporter,
+            )
+        if args.data_command == "activate-base":
+            return activate_base(
+                args.manifest.resolve(),
+                expected_current_snapshot_id=args.expected_current,
+                progress=reporter,
+            )
         raise AssertionError(f"Unhandled data command: {args.data_command}")
     if args.command == "validate-data":
         return validate_data(
@@ -221,6 +278,28 @@ def _dispatch(args: argparse.Namespace, reporter: ProgressReporter) -> dict[str,
             snapshot_path=paths.data / "active.json",
             progress=reporter,
         )
+    if args.command == "results":
+        if args.results_command == "publish":
+            return publish_result(paths.runs, args.run_id, progress=reporter)
+        if args.results_command == "pull":
+            return pull_result(paths.runs, args.run_id, progress=reporter)
+        if args.results_command == "verify":
+            return verify_result(paths.runs, args.run_id, progress=reporter)
+        raise AssertionError(f"Unhandled results command: {args.results_command}")
+    if args.command == "split":
+        if args.split_command == "propose":
+            output_dir = (
+                paths.root / "split-proposals"
+                if args.output_dir is None
+                else args.output_dir.resolve()
+            )
+            return propose_from_active(
+                PROJECT_ROOT,
+                paths.data / "active.json",
+                output_dir,
+                version=args.version,
+            )
+        raise AssertionError(f"Unhandled split command: {args.split_command}")
     if args.command == "test":
         return _run_tests(reporter)
     if args.command == "smoke":
@@ -248,7 +327,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True, allow_nan=True))
     else:
-        render_result(args.command, result, data_action=getattr(args, "data_command", None))
+        render_result(
+            args.command,
+            result,
+            data_action=getattr(args, "data_command", None),
+            results_action=getattr(args, "results_command", None),
+        )
 
 
 if __name__ == "__main__":

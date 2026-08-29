@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from imu_benchmark import cloud_data, runtime
-from imu_benchmark.cloud_data import _validate_remote_manifest, data_bucket
+from imu_benchmark.cloud_data import _remote_snapshot, _validate_remote_manifest, data_bucket
 from imu_benchmark.configuration import PUBLIC_MODEL_IDS, load_experiment
 from imu_benchmark.dataset import validate_data
 from imu_benchmark.device import CudaUnavailable, _parse_nvidia_smi_line
@@ -62,6 +62,25 @@ def test_smoke_plan_contains_seven_public_fall_models(active_manifest_path: Path
     assert tuple(result["models"]) == PUBLIC_MODEL_IDS
     assert result["split_protocol"]["validation_fold_by_test_fold"] == {0: 1}
     assert all(job["objective"] == "temporal_supervised" for job in result["jobs"])
+
+
+def test_temporal_core_onnx_plan_contains_65_full_parity_jobs(
+    active_manifest_path: Path,
+) -> None:
+    config = load_experiment(
+        PROJECT_ROOT,
+        PROJECT_ROOT
+        / "configs/experiments/formal_baseline_temporal_core_onnx_v1.yaml",
+        snapshot_path=active_manifest_path,
+    )
+    result = plan_experiment(config)
+    assert result["scheduled_jobs"] == 65
+    assert config["export_onnx"] is True
+    assert config["onnx_parity_splits"] == ["validation", "test"]
+    assert config["onnx_parity_batch_size"] == 256
+    assert config["onnx_parity_max_samples"] is None
+    assert config["onnx_parity_rtol"] == 1e-4
+    assert config["onnx_parity_atol"] == 2e-3
 
 
 def test_team_fold_is_training_only(active_manifest_path: Path) -> None:
@@ -140,7 +159,7 @@ def test_performance_and_nvidia_telemetry_helpers() -> None:
 
 def test_versioned_base_manifest_is_cloud_safe(monkeypatch: pytest.MonkeyPatch) -> None:
     manifest = json.loads(
-        (PROJECT_ROOT / "configs/data/base_imu25_v1.json").read_text(encoding="utf-8")
+        (PROJECT_ROOT / "configs/data/base_imu25_v2.json").read_text(encoding="utf-8")
     )
     _validate_remote_manifest(manifest, expected_kind="base")
     monkeypatch.setenv("IMU_BENCH_DATA_BUCKET", "gs://team-bucket")
@@ -148,6 +167,65 @@ def test_versioned_base_manifest_is_cloud_safe(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("IMU_BENCH_DATA_BUCKET", "gs://team-bucket/prefix")
     with pytest.raises(ValueError, match="bucket URI"):
         data_bucket()
+
+
+def test_exact_snapshot_resolution_does_not_read_current_pointer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_bytes = (PROJECT_ROOT / "configs/data/base_imu25_v2.json").read_bytes()
+    requested = []
+
+    def fake_cat(uri: str, *, optional: bool = False) -> bytes:
+        requested.append((uri, optional))
+        return manifest_bytes
+
+    monkeypatch.setattr(cloud_data, "_gcloud_cat", fake_cat)
+    resolved = _remote_snapshot(
+        "gs://team-bucket",
+        kind="base",
+        current_object="benchmark-datasets/base/current.json",
+        optional=False,
+        snapshot_id="imu_25hz_snapshot_v2",
+    )
+    assert resolved is not None
+    current, manifest = resolved
+    assert manifest["snapshot_id"] == "imu_25hz_snapshot_v2"
+    assert current["manifest_object"].endswith(
+        "/base/imu_25hz_snapshot_v2/manifest.json"
+    )
+    assert all(not uri.endswith("/current.json") for uri, _ in requested)
+
+
+def test_exact_team_snapshot_preserves_collection_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = json.loads(
+        (PROJECT_ROOT / "configs/data/base_imu25_v2.json").read_text(encoding="utf-8")
+    )
+    manifest["kind"] = "team"
+    manifest["snapshot_id"] = "snapshot-team-v1"
+    for entry in manifest["files"]:
+        entry["evaluation_role"] = "training_only"
+    manifest_bytes = (json.dumps(manifest, sort_keys=True) + "\n").encode()
+    requested = []
+
+    def fake_cat(uri: str, *, optional: bool = False) -> bytes:
+        requested.append((uri, optional))
+        return manifest_bytes
+
+    monkeypatch.setattr(cloud_data, "_gcloud_cat", fake_cat)
+    resolved = _remote_snapshot(
+        "gs://team-bucket",
+        kind="team",
+        current_object="benchmark-datasets/team/cw12eu/current.json",
+        optional=False,
+        snapshot_id="snapshot-team-v1",
+    )
+    assert resolved is not None
+    assert resolved[0]["manifest_object"] == (
+        "benchmark-datasets/team/cw12eu/snapshot-team-v1/manifest.json"
+    )
+    assert all(not uri.endswith("/current.json") for uri, _ in requested)
 
 
 def test_headless_data_pull_requires_prior_gcloud_login(
@@ -172,8 +250,8 @@ def test_reviewed_base_hdf5_integration(active_manifest_path: Path) -> None:
     if source_value is None:
         pytest.skip("IMU_BENCH_INTEGRATION_DATA_DIR is not set")
     source = Path(source_value).resolve()
-    destination = active_manifest_path.parent / "base/imu_25hz_snapshot_v1/datasets"
-    destination.parent.mkdir(parents=True)
+    destination = active_manifest_path.parent / "base/imu_25hz_snapshot_v2/datasets"
+    destination.parent.mkdir(parents=True, exist_ok=True)
     destination.symlink_to(source, target_is_directory=True)
     result = validate_data(PROJECT_ROOT, snapshot_path=active_manifest_path)
     assert result["status"] == "PASS"

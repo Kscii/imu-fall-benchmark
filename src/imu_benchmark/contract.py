@@ -8,8 +8,16 @@ from pathlib import Path
 from typing import Any
 
 CONTRACT_VERSION = "imu_benchmark_contract_v2"
-SNAPSHOT_VERSION = "imu_25hz_snapshot_v1"
-ACTIVE_SCHEMA_VERSION = "imu_benchmark_active_v1"
+SNAPSHOT_VERSION = "imu_25hz_snapshot_v2"
+ACTIVE_SCHEMA_VERSION = "imu_benchmark_active_v2"
+SUPPORTED_ACTIVE_SCHEMA_VERSIONS = {
+    "imu_benchmark_active_v1",
+    ACTIVE_SCHEMA_VERSION,
+}
+SUPPORTED_SNAPSHOT_VERSIONS = {
+    "imu_25hz_snapshot_v1",
+    SNAPSHOT_VERSION,
+}
 DEFAULT_CONTRACT_PATH = Path("configs/contracts/imu_benchmark_contract_v2.json")
 DEFAULT_SNAPSHOT_PATH = Path("active.json")
 
@@ -246,9 +254,10 @@ def _validate_dataset_entries(
 
 
 def validate_snapshot_shape(snapshot: dict[str, Any], contract: dict[str, Any]) -> None:
-    if snapshot.get("schema_version") != ACTIVE_SCHEMA_VERSION:
+    schema_version = snapshot.get("schema_version")
+    if schema_version not in SUPPORTED_ACTIVE_SCHEMA_VERSIONS:
         raise ValueError("Unexpected active-data manifest schema")
-    if snapshot.get("snapshot_version") != SNAPSHOT_VERSION:
+    if snapshot.get("snapshot_version") not in SUPPORTED_SNAPSHOT_VERSIONS:
         raise ValueError("Unexpected data snapshot version")
     if snapshot.get("contract_version") != contract["contract_version"]:
         raise ValueError("Snapshot and contract versions differ")
@@ -269,8 +278,28 @@ def validate_snapshot_shape(snapshot: dict[str, Any], contract: dict[str, Any]) 
     if not isinstance(splits, list) or not splits:
         raise ValueError("Base collection requires participant split manifests")
     for split in splits:
-        if not isinstance(split, dict) or set(split) != {"path", "version", "sha256"}:
+        required = {"path", "version", "sha256"}
+        optional = {"size_bytes"} if schema_version == ACTIVE_SCHEMA_VERSION else set()
+        if (
+            not isinstance(split, dict)
+            or not required.issubset(split)
+            or not set(split).issubset(required | optional)
+        ):
             raise ValueError("Invalid base split manifest")
+        relative = split["path"]
+        if (
+            not isinstance(relative, str)
+            or Path(relative).is_absolute()
+            or ".." in Path(relative).parts
+        ):
+            raise ValueError("Invalid base split path")
+        digest = split["sha256"]
+        if not isinstance(digest, str) or len(digest) != 64:
+            raise ValueError("Invalid base split SHA-256")
+        if "size_bytes" in split and (
+            not isinstance(split["size_bytes"], int) or split["size_bytes"] < 0
+        ):
+            raise ValueError("Invalid base split size")
     _validate_dataset_entries(
         base["datasets"],
         expected_role="cross_validation",

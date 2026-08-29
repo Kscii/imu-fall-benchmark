@@ -1,15 +1,20 @@
 [project]
 name = "imu-fall-benchmark"
-version = "0.1.0"
+version = "0.2.0"
 description = "Reproducible CUDA benchmark for chest- and waist-mounted fall-detection IMU data"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "h5py>=3.12",
     "numpy>=2.0",
+    "onnx==1.22.0",
+    "onnxmltools==1.16.0",
+    "onnxruntime==1.25.1",
+    "onnxscript==0.7.1",
     "pyyaml>=6.0,<7",
     "rich==15.0.0",
     "scikit-learn>=1.9,<2",
+    "skl2onnx==1.20.0",
 ]
 
 [project.scripts]
