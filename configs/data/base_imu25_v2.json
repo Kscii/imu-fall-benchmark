@@ -227,7 +227,7 @@
   "snapshot_id": "imu_25hz_snapshot_v2",
   "source": {
     "branch": "data/univrfall-impact-tail-v2",
-    "data_commit": "b1e20c8",
+    "data_commit": "d50234f08a869b40a03ef8ea258545e221e75c96",
     "repository": "SOFT3888_TU16_04"
   },
   "split_set_id": "public_participant_5fold_sticky_v1",
