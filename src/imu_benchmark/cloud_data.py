@@ -246,7 +246,11 @@ def _remote_snapshot(
     if snapshot_id is not None:
         if not snapshot_id or Path(snapshot_id).name != snapshot_id:
             raise ValueError(f"Invalid {kind} snapshot ID")
-        manifest_object = f"{BENCHMARK_PREFIX}/{kind}/{snapshot_id}/manifest.json"
+        suffix = "/current.json"
+        if not current_object.endswith(suffix):
+            raise ValueError(f"Invalid {kind} current object path")
+        snapshot_prefix = current_object[: -len(suffix)]
+        manifest_object = f"{snapshot_prefix}/{snapshot_id}/manifest.json"
         manifest_bytes = _gcloud_cat(
             _object_uri(bucket, manifest_object),
             optional=optional,

@@ -177,6 +177,38 @@ def test_exact_snapshot_resolution_does_not_read_current_pointer(
     assert all(not uri.endswith("/current.json") for uri, _ in requested)
 
 
+def test_exact_team_snapshot_preserves_collection_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = json.loads(
+        (PROJECT_ROOT / "configs/data/base_imu25_v2.json").read_text(encoding="utf-8")
+    )
+    manifest["kind"] = "team"
+    manifest["snapshot_id"] = "snapshot-team-v1"
+    for entry in manifest["files"]:
+        entry["evaluation_role"] = "training_only"
+    manifest_bytes = (json.dumps(manifest, sort_keys=True) + "\n").encode()
+    requested = []
+
+    def fake_cat(uri: str, *, optional: bool = False) -> bytes:
+        requested.append((uri, optional))
+        return manifest_bytes
+
+    monkeypatch.setattr(cloud_data, "_gcloud_cat", fake_cat)
+    resolved = _remote_snapshot(
+        "gs://team-bucket",
+        kind="team",
+        current_object="benchmark-datasets/team/cw12eu/current.json",
+        optional=False,
+        snapshot_id="snapshot-team-v1",
+    )
+    assert resolved is not None
+    assert resolved[0]["manifest_object"] == (
+        "benchmark-datasets/team/cw12eu/snapshot-team-v1/manifest.json"
+    )
+    assert all(not uri.endswith("/current.json") for uri, _ in requested)
+
+
 def test_headless_data_pull_requires_prior_gcloud_login(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

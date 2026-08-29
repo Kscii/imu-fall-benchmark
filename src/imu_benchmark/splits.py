@@ -195,10 +195,10 @@ def write_proposal(
             for dataset_id, participant_id in new_keys
         ],
         "folds": fold_summary,
-        "csv_path": str(csv_path),
+        "csv_path": csv_path.name,
     }
     report_path = output_dir / f"{version}.report.json"
-    report["report_path"] = str(report_path)
+    report["report_path"] = report_path.name
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     return report
 

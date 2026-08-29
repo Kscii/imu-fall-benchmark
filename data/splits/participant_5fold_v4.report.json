@@ -1,6 +1,6 @@
 {
   "changed_existing_assignments": 0,
-  "csv_path": "/home/kscii/Codes/imu-fall-benchmark/data/splits/participant_5fold_v4.csv",
+  "csv_path": "participant_5fold_v4.csv",
   "folds": {
     "0": {
       "adl_rows": 1085971,
@@ -91,7 +91,7 @@
   "new_assignments": 0,
   "new_participants": [],
   "participants": 192,
-  "report_path": "/home/kscii/Codes/imu-fall-benchmark/data/splits/participant_5fold_v4.report.json",
+  "report_path": "participant_5fold_v4.report.json",
   "schema_version": "imu_benchmark_split_proposal_v1",
   "seed": 3888,
   "status": "PASS",
