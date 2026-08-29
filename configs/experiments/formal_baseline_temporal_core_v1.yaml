@@ -1,0 +1,36 @@
+schema_version: 3
+id: formal_baseline_temporal_core_v1
+contract_path: configs/contracts/imu_benchmark_contract_v2.json
+snapshot_path: active.json
+data_view_path: configs/data_views/temporal_core_v1.yaml
+model_catalog_path: configs/models/fall_models_v1.yaml
+alarm_policy_path: configs/evaluation/alarm_policies_v1.yaml
+models:
+  - threshold_impact
+  - cuml_logistic_regression
+  - cuml_random_forest
+  - xgboost_cuda
+  - torch_1d_cnn
+  - torch_lstm
+  - torch_cnn_lstm
+folds: [0, 1, 2, 3, 4]
+seeds: [3888]
+seed_policy: deterministic_models_single_seed
+training_recipes:
+  - natural
+  - participant_class_balanced
+precision: fp32
+gpu_mode: auto
+max_epochs: 100
+patience: 12
+max_sequences_per_split: null
+max_windows_per_sequence: null
+cache_flush_windows: 16384
+bootstrap_replicates: 5000
+export_onnx: false
+data_quality_status: internal_temporal_core_ablation
+known_limitations:
+  - This single-seed temporal-core ablation is supporting evidence, not the main comparison.
+  - KFall and UNIVRFall are both lower-back datasets, so body-location generalisation is not tested.
+  - Simulated public falls may not represent real older-adult falls or the final device.
+  - Alarm-policy candidates are selected only from validation-fold Pareto fronts.

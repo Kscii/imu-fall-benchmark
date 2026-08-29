@@ -66,10 +66,16 @@ def _render_data(console: Console, action: str, result: dict[str, Any]) -> None:
             f"Remote team: {result['remote_team_snapshot_id'] or 'none'} | "
             f"Update available: {result['update_available']}"
         )
-    else:
+    elif action == "publish-base":
         console.print(
             f"Snapshot: {result['snapshot_id']} | Files: {result['files']} | "
             f"Manifest SHA-256: {result['manifest_sha256']}"
+        )
+        console.print("Staged only; current.json was not changed.")
+    elif action == "activate-base":
+        console.print(
+            f"Snapshot: {result['snapshot_id']} | Changed: {result['changed']} | "
+            f"Manifest SHA-256: {result.get('manifest_sha256', 'unchanged')}"
         )
 
 

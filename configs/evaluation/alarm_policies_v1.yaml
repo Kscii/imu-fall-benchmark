@@ -1,0 +1,44 @@
+schema_version: 1
+reference_policy: one_of_one_cooldown_10s
+selection: validation_pareto_sensitivity_alarm_rate_latency
+policies:
+  - id: one_of_one_cooldown_10s
+    required_positive_windows: 1
+    lookback_windows: 1
+    consecutive: true
+    cooldown_seconds: 10.0
+  - id: one_of_one_cooldown_30s
+    required_positive_windows: 1
+    lookback_windows: 1
+    consecutive: true
+    cooldown_seconds: 30.0
+  - id: consecutive_two_cooldown_10s
+    required_positive_windows: 2
+    lookback_windows: 2
+    consecutive: true
+    cooldown_seconds: 10.0
+  - id: consecutive_two_cooldown_30s
+    required_positive_windows: 2
+    lookback_windows: 2
+    consecutive: true
+    cooldown_seconds: 30.0
+  - id: two_of_three_cooldown_10s
+    required_positive_windows: 2
+    lookback_windows: 3
+    consecutive: false
+    cooldown_seconds: 10.0
+  - id: two_of_three_cooldown_30s
+    required_positive_windows: 2
+    lookback_windows: 3
+    consecutive: false
+    cooldown_seconds: 30.0
+  - id: three_of_five_cooldown_10s
+    required_positive_windows: 3
+    lookback_windows: 5
+    consecutive: false
+    cooldown_seconds: 10.0
+  - id: three_of_five_cooldown_30s
+    required_positive_windows: 3
+    lookback_windows: 5
+    consecutive: false
+    cooldown_seconds: 30.0

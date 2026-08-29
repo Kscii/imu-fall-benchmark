@@ -7,7 +7,13 @@ import yaml
 
 from imu_benchmark import engine
 from imu_benchmark.configuration import load_experiment
-from imu_benchmark.engine import _job_hash, _result_rows, build_jobs, plan_experiment
+from imu_benchmark.engine import (
+    _job_hash,
+    _result_rows,
+    build_jobs,
+    plan_experiment,
+    training_recipe_indices,
+)
 from imu_benchmark.models import CuMLAdapter, ModelConvergenceError
 from imu_benchmark.specs import MODEL_SPECS
 
@@ -51,13 +57,35 @@ def test_checkpoint_schema_version_changes_job_hash(
         engine.JOB_CHECKPOINT_SCHEMA_VERSION
     )
     job = build_jobs(config)[0]
-    original = _job_hash(config, "cache-fingerprint", job)
+    original = _job_hash(config, "cache-fingerprint", "source-a", job)
     monkeypatch.setattr(
         engine,
         "JOB_CHECKPOINT_SCHEMA_VERSION",
         engine.JOB_CHECKPOINT_SCHEMA_VERSION + 1,
     )
-    assert _job_hash(config, "cache-fingerprint", job) != original
+    assert _job_hash(config, "cache-fingerprint", "source-a", job) != original
+
+
+def test_source_fingerprint_changes_job_hash(active_manifest_path: Path) -> None:
+    config = _config(active_manifest_path)
+    job = build_jobs(config)[0]
+    first = _job_hash(config, "cache-fingerprint", "source-a", job)
+    second = _job_hash(config, "cache-fingerprint", "source-b", job)
+    assert first != second
+
+
+def test_formal_run_rejects_unknown_source_before_data_access(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="clean Git commit or immutable source snapshot"):
+        engine.run_experiment(
+            project_root=tmp_path,
+            cache_root=tmp_path / "cache",
+            runs_root=tmp_path / "runs",
+            config={"data_quality_status": "internal_formal_baseline"},
+            resume=True,
+            environment={},
+            source={"kind": "unknown", "dirty": None},
+            warnings=["source_unknown"],
+        )
 
 
 def test_result_rows_distinguish_compute_and_classification_precision() -> None:
@@ -86,3 +114,39 @@ def test_result_rows_distinguish_compute_and_classification_precision() -> None:
     assert event_rows[0]["compute_precision"] == "fp32"
     assert subgroup_rows == []
     assert external_rows == []
+
+
+def test_participant_class_balanced_recipe_is_deterministic() -> None:
+    store = SimpleNamespace(
+        temporal_label=np.asarray([0, 0, 0, 0, 1, 1], dtype=np.int8),
+        sequence_index=np.arange(6, dtype=np.int32),
+        dataset_id=np.asarray(["d"] * 6),
+        participant_id=np.asarray(["a", "a", "b", "b", "c", "d"]),
+    )
+    indices = np.arange(6, dtype=np.int64)
+    first, metadata = training_recipe_indices(
+        store, indices, "participant_class_balanced", 3888
+    )
+    second, repeated_metadata = training_recipe_indices(
+        store, indices, "participant_class_balanced", 3888
+    )
+    np.testing.assert_array_equal(first, second)
+    assert metadata == repeated_metadata
+    labels = store.temporal_label[first]
+    assert np.count_nonzero(labels == 0) == np.count_nonzero(labels == 1) == 3
+
+
+def test_formal_job_matrices_match_the_reviewed_scope(active_manifest_path: Path) -> None:
+    main = load_experiment(
+        PROJECT_ROOT,
+        PROJECT_ROOT / "configs/experiments/formal_baseline_main_v1.yaml",
+        snapshot_path=active_manifest_path,
+    )
+    temporal_core = load_experiment(
+        PROJECT_ROOT,
+        PROJECT_ROOT / "configs/experiments/formal_baseline_temporal_core_v1.yaml",
+        snapshot_path=active_manifest_path,
+    )
+    assert len(build_jobs(main)) == 265
+    assert len(build_jobs(temporal_core)) == 65
+    assert len([job for job in build_jobs(main) if job.model_id == "threshold_impact"]) == 5

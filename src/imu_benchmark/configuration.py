@@ -15,7 +15,8 @@ from .contract import (
     load_contract_snapshot,
 )
 
-CONFIG_SCHEMA_VERSION = 2
+CONFIG_SCHEMA_VERSION = 3
+SUPPORTED_CONFIG_SCHEMA_VERSIONS = {2, CONFIG_SCHEMA_VERSION}
 PUBLIC_MODEL_IDS = (
     "threshold_impact",
     "cuml_logistic_regression",
@@ -104,7 +105,7 @@ def _validate_data_view(payload: dict[str, Any]) -> None:
         },
         "data view",
     )
-    if payload["schema_version"] != CONFIG_SCHEMA_VERSION:
+    if payload["schema_version"] not in SUPPORTED_CONFIG_SCHEMA_VERSIONS:
         raise ValueError("Unsupported data-view schema")
     if payload["objective"] not in OBJECTIVES:
         raise ValueError("Unsupported data-view objective")
@@ -126,10 +127,60 @@ def _validate_data_view(payload: dict[str, Any]) -> None:
         raise ValueError("research_only must be boolean")
 
 
-def _validate_experiment(payload: dict[str, Any]) -> None:
+def _validate_alarm_policy(payload: dict[str, Any]) -> None:
     _exact_keys(
         payload,
-        {
+        {"schema_version", "reference_policy", "selection", "policies"},
+        "alarm policy catalog",
+    )
+    if payload["schema_version"] != 1:
+        raise ValueError("Unsupported alarm policy schema")
+    if payload["selection"] != "validation_pareto_sensitivity_alarm_rate_latency":
+        raise ValueError("Unsupported alarm policy selection")
+    policies = payload["policies"]
+    if not isinstance(policies, list) or not policies:
+        raise ValueError("Alarm policy catalog is empty")
+    ids = set()
+    for policy in policies:
+        if not isinstance(policy, dict):
+            raise ValueError("Invalid alarm policy")
+        _exact_keys(
+            policy,
+            {
+                "id",
+                "required_positive_windows",
+                "lookback_windows",
+                "consecutive",
+                "cooldown_seconds",
+            },
+            "alarm policy",
+        )
+        policy_id = policy["id"]
+        if not isinstance(policy_id, str) or not policy_id or policy_id in ids:
+            raise ValueError("Duplicate or invalid alarm policy ID")
+        ids.add(policy_id)
+        required = policy["required_positive_windows"]
+        lookback = policy["lookback_windows"]
+        if (
+            not isinstance(required, int)
+            or not isinstance(lookback, int)
+            or required <= 0
+            or lookback < required
+            or not isinstance(policy["consecutive"], bool)
+            or not isinstance(policy["cooldown_seconds"], (int, float))
+            or policy["cooldown_seconds"] < 0
+        ):
+            raise ValueError(f"Invalid alarm policy values: {policy_id}")
+        if policy["consecutive"] and required != lookback:
+            raise ValueError(
+                f"Consecutive alarm policy must require its full lookback: {policy_id}"
+            )
+    if payload["reference_policy"] not in ids:
+        raise ValueError("Reference alarm policy is absent from the catalog")
+
+
+def _validate_experiment(payload: dict[str, Any]) -> None:
+    common = {
             "schema_version",
             "id",
             "contract_path",
@@ -148,10 +199,21 @@ def _validate_experiment(payload: dict[str, Any]) -> None:
             "cache_flush_windows",
             "data_quality_status",
             "known_limitations",
-        },
+    }
+    schema_version = payload.get("schema_version")
+    formal = {
+        "training_recipes",
+        "seed_policy",
+        "alarm_policy_path",
+        "bootstrap_replicates",
+        "export_onnx",
+    }
+    _exact_keys(
+        payload,
+        common | (formal if schema_version == CONFIG_SCHEMA_VERSION else set()),
         "experiment",
     )
-    if payload["schema_version"] != CONFIG_SCHEMA_VERSION:
+    if schema_version not in SUPPORTED_CONFIG_SCHEMA_VERSIONS:
         raise ValueError("Unsupported experiment schema")
     if payload["precision"] not in PRECISIONS or payload["gpu_mode"] not in GPU_MODES:
         raise ValueError("Unsupported precision or GPU mode")
@@ -170,6 +232,29 @@ def _validate_experiment(payload: dict[str, Any]) -> None:
         raise ValueError("Experiment seeds must be a non-empty integer list")
     if len(seeds) != len(set(seeds)):
         raise ValueError("Experiment seeds must be unique")
+    if schema_version == CONFIG_SCHEMA_VERSION:
+        recipes = payload["training_recipes"]
+        allowed_recipes = {"natural", "participant_class_balanced"}
+        if (
+            not isinstance(recipes, list)
+            or not recipes
+            or len(recipes) != len(set(recipes))
+            or set(recipes) - allowed_recipes
+        ):
+            raise ValueError("Unsupported or duplicate training recipe")
+        if payload["seed_policy"] != "deterministic_models_single_seed":
+            raise ValueError("Unsupported formal seed policy")
+        if not isinstance(payload["alarm_policy_path"], str) or not payload[
+            "alarm_policy_path"
+        ]:
+            raise ValueError("Formal experiments require alarm_policy_path")
+        if (
+            not isinstance(payload["bootstrap_replicates"], int)
+            or payload["bootstrap_replicates"] < 0
+        ):
+            raise ValueError("bootstrap_replicates must be a non-negative integer")
+        if not isinstance(payload["export_onnx"], bool):
+            raise ValueError("export_onnx must be boolean")
     for name in ("max_epochs", "patience", "cache_flush_windows"):
         if not isinstance(payload[name], int) or payload[name] <= 0:
             raise ValueError(f"{name} must be a positive integer")
@@ -226,6 +311,25 @@ def load_experiment(
     ):
         raise ValueError("BF16 experiments may select PyTorch models only")
     resolved = deepcopy(experiment)
+    if experiment["schema_version"] == 2:
+        resolved.update(
+            {
+                "training_recipes": ["legacy_class_weighted"],
+                "seed_policy": "all_models_all_seeds",
+                "alarm_policy_path": None,
+                "bootstrap_replicates": 0,
+                "export_onnx": False,
+            }
+        )
+    elif experiment["alarm_policy_path"] is not None:
+        alarm_path = _project_path(
+            project_root,
+            experiment["alarm_policy_path"],
+            parent="alarm_policy_path",
+        )
+        resolved["alarm_policy"] = _read_yaml(alarm_path)
+        _validate_alarm_policy(resolved["alarm_policy"])
+        resolved["alarm_policy_sha256"] = canonical_sha256(resolved["alarm_policy"])
     resolved.update(
         {
             "config_path": str(resolved_path.relative_to(project_root.resolve())),
