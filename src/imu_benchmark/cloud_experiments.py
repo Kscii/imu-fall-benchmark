@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import UTC, datetime
@@ -78,9 +79,7 @@ def _metadata(
             "filename": "manifest.json",
             "object_key": result_manifest_key,
             "size_bytes": len(_json_bytes(result_manifest)),
-            "sha256": __import__("hashlib").sha256(
-                _json_bytes(result_manifest)
-            ).hexdigest(),
+            "sha256": hashlib.sha256(_json_bytes(result_manifest)).hexdigest(),
             "content_type": "application/json",
         },
         "bundle": {

@@ -43,7 +43,7 @@
 一次团队快照包含：
 
 ```text
-benchmark-datasets/team/cw12eu/<snapshot_id>/cw12eu.h5
+benchmark-datasets/team/cw12eu/<snapshot_id>/datasets/cw12eu.h5
 benchmark-datasets/team/cw12eu/<snapshot_id>/manifest.json
 benchmark-datasets/team/cw12eu/current.json
 ```
@@ -61,7 +61,7 @@ benchmark-datasets/team/cw12eu/current.json
   "files": [
     {
       "filename": "cw12eu.h5",
-      "object_key": "benchmark-datasets/team/cw12eu/.../cw12eu.h5",
+      "object_key": "benchmark-datasets/team/cw12eu/.../datasets/cw12eu.h5",
       "size_bytes": 1,
       "sha256": "...",
       "content_type": "application/x-hdf5"
