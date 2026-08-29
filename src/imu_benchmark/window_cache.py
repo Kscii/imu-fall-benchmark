@@ -28,10 +28,19 @@ def _text_array(dataset: h5py.Dataset) -> np.ndarray:
     )
 
 
-def _split_assignments(project_root: Path, snapshot: dict[str, Any]) -> dict[tuple[str, str], int]:
+def _split_assignments(
+    project_root: Path,
+    active_root: Path,
+    snapshot: dict[str, Any],
+) -> dict[tuple[str, str], int]:
     result: dict[tuple[str, str], int] = {}
+    split_root = (
+        project_root
+        if snapshot["schema_version"] == "imu_benchmark_active_v1"
+        else active_root
+    )
     for split in snapshot["collections"]["base"]["splits"]:
-        path = project_root / split["path"]
+        path = split_root / split["path"]
         with path.open(encoding="utf-8-sig", newline="") as source:
             for row in csv.DictReader(source):
                 if row["split_version"] != split["version"]:
@@ -48,7 +57,7 @@ def _recording_collections(
     active_root: Path,
     snapshot: dict[str, Any],
 ) -> Iterator[tuple[IMURecording, int]]:
-    assignments = _split_assignments(project_root, snapshot)
+    assignments = _split_assignments(project_root, active_root, snapshot)
     for collection_name, collection in snapshot["collections"].items():
         dataset_ids = tuple(item["dataset_id"] for item in collection["datasets"])
         for recording in iter_recordings(

@@ -316,7 +316,7 @@ def validate_hdf5_file(path: Path) -> dict[str, object]:
 
 
 def _check_splits(
-    project_root: Path,
+    split_root: Path,
     manifests: object,
     participants: set[tuple[str, str]],
 ) -> dict[str, object]:
@@ -327,7 +327,7 @@ def _check_splits(
     for manifest in manifests:
         if not isinstance(manifest, dict):
             raise ValueError("Invalid participant split manifest")
-        split_path = project_root / str(manifest["path"])
+        split_path = split_root / str(manifest["path"])
         if not split_path.is_file() or _sha256(split_path) != manifest["sha256"]:
             raise ValueError(f"Participant split checksum mismatch: {split_path}")
         version = str(manifest["version"])
@@ -451,8 +451,13 @@ def validate_data(
         reporter,
         "base",
     )
+    split_root = (
+        project_root
+        if snapshot["schema_version"] == "imu_benchmark_active_v1"
+        else active_path.parent
+    )
     base_split = _check_splits(
-        project_root,
+        split_root,
         base_collection["splits"],
         base_participants,
     )

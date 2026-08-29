@@ -13,7 +13,6 @@ from typing import Any
 from .contract import (
     ACTIVE_SCHEMA_VERSION,
     CONTRACT_VERSION,
-    SNAPSHOT_VERSION,
     canonical_json_sha256,
     validate_snapshot_shape,
 )
@@ -22,9 +21,13 @@ from .progress import NullProgressReporter, ProgressReporter
 
 DEFAULT_BUCKET = "gs://soft3888-label"
 BENCHMARK_PREFIX = "benchmark-datasets"
-REMOTE_MANIFEST_SCHEMA = "imu_benchmark_dataset_manifest_v1"
+REMOTE_MANIFEST_SCHEMA = "imu_benchmark_dataset_manifest_v2"
+SUPPORTED_REMOTE_MANIFEST_SCHEMAS = {
+    "imu_benchmark_dataset_manifest_v1",
+    REMOTE_MANIFEST_SCHEMA,
+}
 CURRENT_SCHEMA = "imu_benchmark_current_v1"
-BASE_MANIFEST_PATH = Path("configs/data/base_imu25_v1.json")
+BASE_MANIFEST_PATH = Path("configs/data/base_imu25_v2.json")
 BASE_SPLITS_PATH = Path("configs/data/base_splits_v1.json")
 
 
@@ -139,7 +142,8 @@ def _validate_current(payload: dict[str, Any], *, kind: str) -> None:
 
 
 def _validate_remote_manifest(payload: dict[str, Any], *, expected_kind: str) -> None:
-    if payload.get("schema_version") != REMOTE_MANIFEST_SCHEMA:
+    schema_version = payload.get("schema_version")
+    if schema_version not in SUPPORTED_REMOTE_MANIFEST_SCHEMAS:
         raise ValueError("Unsupported remote dataset manifest")
     if payload.get("kind") != expected_kind:
         raise ValueError("Remote manifest kind differs from current pointer")
@@ -191,6 +195,44 @@ def _validate_remote_manifest(payload: dict[str, Any], *, expected_kind: str) ->
             raise ValueError("Remote manifest does not contain 25 Hz data")
         if item["evaluation_role"] != expected_role:
             raise ValueError("Remote manifest contains an invalid evaluation role")
+    if schema_version == REMOTE_MANIFEST_SCHEMA and expected_kind == "base":
+        split_set_id = payload.get("split_set_id")
+        splits = payload.get("splits")
+        if not isinstance(split_set_id, str) or not split_set_id:
+            raise ValueError("Remote base manifest is missing split_set_id")
+        if not isinstance(splits, list) or not splits:
+            raise ValueError("Remote base manifest contains no split files")
+        split_names: set[str] = set()
+        split_versions: set[str] = set()
+        for item in splits:
+            required = {
+                "object_key",
+                "filename",
+                "size_bytes",
+                "sha256",
+                "version",
+            }
+            if not isinstance(item, dict) or set(item) != required:
+                raise ValueError("Remote base manifest contains an invalid split entry")
+            filename = item["filename"]
+            version = item["version"]
+            if (
+                not isinstance(filename, str)
+                or Path(filename).name != filename
+                or not filename.endswith(".csv")
+                or filename in split_names
+                or not isinstance(version, str)
+                or not version
+                or version in split_versions
+                or not isinstance(item["size_bytes"], int)
+                or item["size_bytes"] < 0
+                or not isinstance(item["sha256"], str)
+                or len(item["sha256"]) != 64
+            ):
+                raise ValueError("Remote base manifest contains an unsafe split entry")
+            _object_uri("gs://validation", str(item["object_key"]))
+            split_names.add(filename)
+            split_versions.add(version)
 
 
 def _remote_snapshot(
@@ -199,7 +241,31 @@ def _remote_snapshot(
     kind: str,
     current_object: str,
     optional: bool,
+    snapshot_id: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    if snapshot_id is not None:
+        if not snapshot_id or Path(snapshot_id).name != snapshot_id:
+            raise ValueError(f"Invalid {kind} snapshot ID")
+        manifest_object = f"{BENCHMARK_PREFIX}/{kind}/{snapshot_id}/manifest.json"
+        manifest_bytes = _gcloud_cat(
+            _object_uri(bucket, manifest_object),
+            optional=optional,
+        )
+        if manifest_bytes is None:
+            return None
+        manifest = _read_json_bytes(manifest_bytes, source=manifest_object)
+        _validate_remote_manifest(manifest, expected_kind=kind)
+        if manifest["snapshot_id"] != snapshot_id:
+            raise ValueError(f"{kind} snapshot ID differs from requested manifest")
+        resolved = {
+            "schema_version": CURRENT_SCHEMA,
+            "kind": kind,
+            "snapshot_id": snapshot_id,
+            "manifest_object": manifest_object,
+            "manifest_sha256": _sha256_bytes(manifest_bytes),
+            "updated_at_utc": manifest["created_at_utc"],
+        }
+        return resolved, manifest
     current_bytes = _gcloud_cat(_object_uri(bucket, current_object), optional=optional)
     if current_bytes is None:
         return None
@@ -237,6 +303,13 @@ def _validate_local_file(path: Path, entry: dict[str, Any]) -> None:
             raise ValueError(f"Local HDF5 {name} mismatch: {path}")
 
 
+def _validate_local_split(path: Path, entry: dict[str, Any]) -> None:
+    if not path.is_file() or path.stat().st_size != int(entry["size_bytes"]):
+        raise ValueError(f"Local participant split size mismatch: {path}")
+    if _sha256_file(path) != entry["sha256"]:
+        raise ValueError(f"Local participant split SHA-256 mismatch: {path}")
+
+
 def _install_snapshot(
     data_root: Path,
     bucket: str,
@@ -244,11 +317,13 @@ def _install_snapshot(
     kind: str,
     manifest: dict[str, Any],
     progress: ProgressReporter,
-) -> tuple[str, list[dict[str, Any]]]:
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]] | None]:
     snapshot_id = str(manifest["snapshot_id"])
     parent = data_root / kind
     final = parent / snapshot_id
     datasets = final / "datasets"
+    split_entries = manifest.get("splits")
+    splits = final / "splits"
     if final.exists():
         with progress.task(
             f"Validating cached {kind} snapshot",
@@ -259,6 +334,16 @@ def _install_snapshot(
                 task.update(detail=str(entry["filename"]))
                 _validate_local_file(datasets / str(entry["filename"]), entry)
                 task.update(advance=1)
+        if isinstance(split_entries, list):
+            with progress.task(
+                f"Validating cached {kind} participant splits",
+                total=len(split_entries),
+                unit="files",
+            ) as task:
+                for entry in split_entries:
+                    task.update(detail=str(entry["filename"]))
+                    _validate_local_split(splits / str(entry["filename"]), entry)
+                    task.update(advance=1)
     else:
         parent.mkdir(parents=True, exist_ok=True)
         staging = parent / f".{snapshot_id}.partial-{os.getpid()}"
@@ -266,6 +351,9 @@ def _install_snapshot(
             shutil.rmtree(staging)
         staging_datasets = staging / "datasets"
         staging_datasets.mkdir(parents=True)
+        staging_splits = staging / "splits"
+        if isinstance(split_entries, list):
+            staging_splits.mkdir(parents=True)
         try:
             total_bytes = sum(int(entry["size_bytes"]) for entry in manifest["files"])
             with progress.task(
@@ -284,6 +372,24 @@ def _install_snapshot(
                     )
                     _validate_local_file(destination, entry)
                     task.update(advance=int(entry["size_bytes"]))
+            if isinstance(split_entries, list):
+                total_split_bytes = sum(int(entry["size_bytes"]) for entry in split_entries)
+                with progress.task(
+                    f"Downloading and validating {kind} participant splits",
+                    total=total_split_bytes,
+                    unit="bytes",
+                ) as task:
+                    for entry in split_entries:
+                        destination = staging_splits / str(entry["filename"])
+                        task.update(detail=str(entry["filename"]))
+                        _run_gcloud(
+                            "storage",
+                            "cp",
+                            _object_uri(bucket, str(entry["object_key"])),
+                            str(destination),
+                        )
+                        _validate_local_split(destination, entry)
+                        task.update(advance=int(entry["size_bytes"]))
             (staging / "manifest.json").write_bytes(_json_bytes(manifest))
             os.replace(staging, final)
         except BaseException:
@@ -299,7 +405,18 @@ def _install_snapshot(
             }
             | {"path": str(entry["filename"])}
         )
-    return f"{kind}/{snapshot_id}/datasets", active_entries
+    active_splits = None
+    if isinstance(split_entries, list):
+        active_splits = [
+            {
+                "path": f"{kind}/{snapshot_id}/splits/{entry['filename']}",
+                "version": entry["version"],
+                "sha256": entry["sha256"],
+                "size_bytes": entry["size_bytes"],
+            }
+            for entry in split_entries
+        ]
+    return f"{kind}/{snapshot_id}/datasets", active_entries, active_splits
 
 
 def _load_splits(project_root: Path) -> list[dict[str, Any]]:
@@ -317,6 +434,9 @@ def pull_data(
     project_root: Path,
     data_root: Path,
     *,
+    base_snapshot_id: str | None = None,
+    team_snapshot_id: str | None = None,
+    include_team: bool = True,
     progress: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     reporter = progress or NullProgressReporter()
@@ -329,27 +449,39 @@ def pull_data(
             kind="base",
             current_object=f"{BENCHMARK_PREFIX}/base/current.json",
             optional=False,
+            snapshot_id=base_snapshot_id,
         )
     assert base_remote is not None
     base_current, base_manifest = base_remote
-    base_path, base_entries = _install_snapshot(
+    base_path, base_entries, installed_splits = _install_snapshot(
         data_root,
         bucket,
         kind="base",
         manifest=base_manifest,
         progress=reporter,
     )
-    with reporter.task("Checking the optional team snapshot"):
-        team_remote = _remote_snapshot(
-            bucket,
-            kind="team",
-            current_object=f"{BENCHMARK_PREFIX}/team/cw12eu/current.json",
-            optional=True,
-        )
+    team_remote = None
+    if include_team:
+        with reporter.task("Checking the optional team snapshot"):
+            team_remote = _remote_snapshot(
+                bucket,
+                kind="team",
+                current_object=f"{BENCHMARK_PREFIX}/team/cw12eu/current.json",
+                optional=team_snapshot_id is None,
+                snapshot_id=team_snapshot_id,
+            )
+    active_schema = (
+        ACTIVE_SCHEMA_VERSION
+        if base_manifest["schema_version"] == REMOTE_MANIFEST_SCHEMA
+        else "imu_benchmark_active_v1"
+    )
+    active_splits = (
+        installed_splits if installed_splits is not None else _load_splits(project_root)
+    )
     collections: dict[str, Any] = {
         "base": {
             "data_path": base_path,
-            "splits": _load_splits(project_root),
+            "splits": active_splits,
             "datasets": base_entries,
         }
     }
@@ -357,7 +489,7 @@ def pull_data(
     team_current = None
     if team_remote is not None:
         team_current, team_manifest = team_remote
-        team_path, team_entries = _install_snapshot(
+        team_path, team_entries, _ = _install_snapshot(
             data_root,
             bucket,
             kind="team",
@@ -371,8 +503,8 @@ def pull_data(
         }
         team_snapshot_id = team_manifest["snapshot_id"]
     active = {
-        "schema_version": ACTIVE_SCHEMA_VERSION,
-        "snapshot_version": SNAPSHOT_VERSION,
+        "schema_version": active_schema,
+        "snapshot_version": base_manifest["snapshot_id"],
         "contract_version": CONTRACT_VERSION,
         "bucket": bucket,
         "base_snapshot_id": base_manifest["snapshot_id"],
@@ -467,13 +599,18 @@ def publish_base(
     project_root: Path,
     source_dir: Path,
     *,
+    manifest_path: Path | None = None,
+    split_dir: Path | None = None,
     progress: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     reporter = progress or NullProgressReporter()
     with reporter.task("Checking Google Cloud sign-in"):
         account = ensure_gcloud_login(interactive=True)
     bucket = data_bucket()
-    manifest_path = project_root / BASE_MANIFEST_PATH
+    manifest_path = (
+        project_root / BASE_MANIFEST_PATH if manifest_path is None else manifest_path
+    )
+    split_dir = project_root / "data/splits" if split_dir is None else split_dir
     manifest_bytes = manifest_path.read_bytes()
     manifest = _read_json_bytes(manifest_bytes, source=str(manifest_path))
     _validate_remote_manifest(manifest, expected_kind="base")
@@ -492,6 +629,22 @@ def publish_base(
                 immutable=True,
             )
             task.update(advance=1)
+    split_entries = manifest.get("splits", [])
+    with reporter.task(
+        "Validating and publishing participant splits",
+        total=len(split_entries),
+        unit="files",
+    ) as task:
+        for entry in split_entries:
+            source = split_dir / str(entry["filename"])
+            task.update(detail=source.name)
+            _validate_local_split(source, entry)
+            _upload_file(
+                source,
+                _object_uri(bucket, str(entry["object_key"])),
+                immutable=True,
+            )
+            task.update(advance=1)
     manifest_object = (
         f"{BENCHMARK_PREFIX}/base/{manifest['snapshot_id']}/manifest.json"
     )
@@ -500,6 +653,51 @@ def publish_base(
         _object_uri(bucket, manifest_object),
         immutable=True,
     )
+    remote_manifest_bytes = _gcloud_cat(
+        _object_uri(bucket, manifest_object),
+        optional=False,
+    )
+    assert remote_manifest_bytes is not None
+    manifest_sha256 = _sha256_bytes(manifest_bytes)
+    if _sha256_bytes(remote_manifest_bytes) != manifest_sha256:
+        raise ValueError("Published base manifest SHA-256 mismatch")
+    return {
+        "status": "PASS",
+        "account": account,
+        "bucket": bucket,
+        "snapshot_id": manifest["snapshot_id"],
+        "files": len(manifest["files"]),
+        "split_files": len(split_entries),
+        "manifest_object": manifest_object,
+        "manifest_sha256": manifest_sha256,
+        "activation_required": True,
+    }
+
+
+def activate_base(
+    manifest_path: Path,
+    *,
+    expected_current_snapshot_id: str,
+    progress: ProgressReporter | None = None,
+) -> dict[str, Any]:
+    reporter = progress or NullProgressReporter()
+    with reporter.task("Checking Google Cloud sign-in"):
+        account = ensure_gcloud_login(interactive=True)
+    bucket = data_bucket()
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = _read_json_bytes(manifest_bytes, source=str(manifest_path))
+    _validate_remote_manifest(manifest, expected_kind="base")
+    manifest_object = (
+        f"{BENCHMARK_PREFIX}/base/{manifest['snapshot_id']}/manifest.json"
+    )
+    with reporter.task("Verifying the staged immutable base manifest"):
+        remote_manifest_bytes = _gcloud_cat(
+            _object_uri(bucket, manifest_object),
+            optional=False,
+        )
+        assert remote_manifest_bytes is not None
+        if remote_manifest_bytes != manifest_bytes:
+            raise ValueError("Staged base manifest does not match the reviewed local file")
     current = {
         "schema_version": CURRENT_SCHEMA,
         "kind": "base",
@@ -513,22 +711,31 @@ def publish_base(
     if existing_bytes is not None:
         existing = _read_json_bytes(existing_bytes, source=current_object)
         _validate_current(existing, kind="base")
-        if existing != current:
+        if existing == current:
+            return {
+                "status": "PASS",
+                "account": account,
+                "bucket": bucket,
+                "snapshot_id": manifest["snapshot_id"],
+                "changed": False,
+            }
+        if existing["snapshot_id"] != expected_current_snapshot_id:
             raise RuntimeError(
-                "The base current pointer already refers to a different immutable snapshot"
+                "The base current pointer changed after review; refusing activation"
             )
-    else:
-        with tempfile.NamedTemporaryFile("wb", suffix=".json", delete=False) as temporary:
-            temporary.write(_json_bytes(current))
-            current_path = Path(temporary.name)
-        try:
-            _upload_file(
-                current_path,
-                _object_uri(bucket, current_object),
-                immutable=True,
-            )
-        finally:
-            current_path.unlink(missing_ok=True)
+    elif expected_current_snapshot_id:
+        raise RuntimeError("The expected base current pointer does not exist")
+    with tempfile.NamedTemporaryFile("wb", suffix=".json", delete=False) as temporary:
+        temporary.write(_json_bytes(current))
+        current_path = Path(temporary.name)
+    try:
+        _upload_file(
+            current_path,
+            _object_uri(bucket, current_object),
+            immutable=False,
+        )
+    finally:
+        current_path.unlink(missing_ok=True)
     remote = _remote_snapshot(
         bucket,
         kind="base",
@@ -541,6 +748,6 @@ def publish_base(
         "account": account,
         "bucket": bucket,
         "snapshot_id": manifest["snapshot_id"],
-        "files": len(manifest["files"]),
         "manifest_sha256": current["manifest_sha256"],
+        "changed": True,
     }
