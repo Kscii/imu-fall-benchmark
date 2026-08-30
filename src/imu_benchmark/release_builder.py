@@ -145,8 +145,9 @@ def load_release_build_config(project_root: Path, path: Path) -> dict[str, Any]:
         raise ValueError("Final release build is fixed to natural FP32 training")
     if int(payload["seed"]) < 0:
         raise ValueError("Release build seed is invalid")
-    if float(payload["deployment_inference_interval_seconds"]) != 1.0:
-        raise ValueError("Deployment inference interval is fixed at one second")
+    interval_seconds = float(payload["deployment_inference_interval_seconds"])
+    if not math.isfinite(interval_seconds) or interval_seconds <= 0:
+        raise ValueError("Deployment inference interval must be finite and positive")
     tolerance = float(payload["event_sensitivity_tolerance_percentage_points"])
     if not 0.0 <= tolerance <= 100.0:
         raise ValueError("Event sensitivity tolerance is invalid")
@@ -416,6 +417,7 @@ def _build_selection_evidence(
         "snapshot_sha256": source_config["snapshot_sha256"],
         "data_split_fingerprint": store.manifest["data_split_fingerprint"],
         "window_schema_version": store.manifest["window_schema_version"],
+        "source_stride_seconds": interval_s,
         "participant_proof": participant_proof,
         "models": model_rows,
     }
@@ -471,6 +473,13 @@ def _release_metadata(
     model_path: Path,
 ) -> dict[str, Any]:
     selected_alarm = selection["alarm_policy_selection"]["selected"]
+    inference_interval_seconds = float(
+        build_config["deployment_inference_interval_seconds"]
+    )
+    source_stride_seconds = float(selection["source_stride_seconds"])
+    if inference_interval_seconds != source_stride_seconds:
+        raise ValueError("Release inference interval differs from selection source stride")
+    training_stride_seconds = float(source_config["contract"]["window"]["stride_seconds"])
     policy_id = selection["alarm_policy_selection"]["selected_policy_id"]
     policy = next(
         item for item in source_config["alarm_policy"]["policies"] if item["id"] == policy_id
@@ -494,6 +503,7 @@ def _release_metadata(
                 "selection_scope": "validation_only_oof",
                 "metric_split": "validation_oof",
                 "selection_eligible": True,
+                "source_stride_seconds": source_stride_seconds,
                 "participant_once": selection["participant_proof"],
                 "threshold_selection": {
                     "method": selection["threshold_selection_method"],
@@ -560,8 +570,8 @@ def _release_metadata(
         },
         "windowing": {
             "window_seconds": 2.0,
-            "training_stride_seconds": 0.5,
-            "inference_interval_seconds": 1.0,
+            "training_stride_seconds": training_stride_seconds,
+            "inference_interval_seconds": inference_interval_seconds,
             "anchor": "window_end",
             "reset_on": ["new_sequence", "stream_gap"],
             "refill_frames_after_reset": 50,
@@ -819,6 +829,7 @@ def build_model_releases(
             )
         selected = {
             **_selection_row(selection, release["model_id"]),
+            "source_stride_seconds": selection["source_stride_seconds"],
             "participant_proof": selection["participant_proof"],
         }
         metadata = _release_metadata(

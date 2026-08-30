@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from imu_benchmark.artifact_contract import validate_model_marker_v1
 from imu_benchmark.release_builder import (
@@ -24,6 +25,32 @@ def test_release_build_config_freezes_three_natural_sequence_candidates() -> Non
     assert tuple(item["model_id"] for item in config["models"]) == SEQUENCE_MODELS
     assert config["training_recipe"] == "natural"
     assert config["deployment_inference_interval_seconds"] == 1.0
+
+
+def test_release_build_config_accepts_release_specific_positive_interval(
+    tmp_path: Path,
+) -> None:
+    source = PROJECT_ROOT / "configs/releases/public_temporal_android_rc1.yaml"
+    payload = source.read_text(encoding="utf-8").replace(
+        "deployment_inference_interval_seconds: 1.0",
+        "deployment_inference_interval_seconds: 0.75",
+    )
+    path = tmp_path / "release.yaml"
+    path.write_text(payload, encoding="utf-8")
+
+    config = load_release_build_config(PROJECT_ROOT, path)
+
+    assert config["deployment_inference_interval_seconds"] == 0.75
+
+    path.write_text(
+        payload.replace(
+            "deployment_inference_interval_seconds: 0.75",
+            "deployment_inference_interval_seconds: 0",
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="finite and positive"):
+        load_release_build_config(PROJECT_ROOT, path)
 
 
 def test_policy_selection_applies_sensitivity_guard_then_alarm_rate_latency_id() -> None:
@@ -110,8 +137,13 @@ def test_release_metadata_embeds_selection_proof_and_final_refit_scope(
             "model_id": "torch_1d_cnn",
             "name": "Public Temporal 1D CNN Natural RC1",
         },
-        build_config={"seed": 3888, "known_limitations": ["research only"]},
+        build_config={
+            "seed": 3888,
+            "deployment_inference_interval_seconds": 0.75,
+            "known_limitations": ["research only"],
+        },
         source_config={
+            "contract": {"window": {"stride_seconds": 0.25}},
             "snapshot": {"base_snapshot_id": "imu_25hz_snapshot_v2"},
             "snapshot_sha256": snapshot,
             "data_view": {"id": "all_temporal_v1"},
@@ -134,6 +166,7 @@ def test_release_metadata_embeds_selection_proof_and_final_refit_scope(
         source={"kind": "git", "commit": source_commit, "dirty": False},
         run_id="final-refit-run",
         selection={
+            "source_stride_seconds": 0.75,
             "participant_proof": {
                 "status": "PASS",
                 "participant_count": 5,
@@ -176,5 +209,11 @@ def test_release_metadata_embeds_selection_proof_and_final_refit_scope(
 
     validate_model_marker_v1(metadata)
     assert metadata["source"]["selection_evidence"]["selection_eligible"] is True
+    assert metadata["windowing"]["training_stride_seconds"] == 0.25
+    assert metadata["windowing"]["inference_interval_seconds"] == 0.75
     assert metadata["metrics"]["final_model_independently_evaluated"] is False
     assert metadata["source"]["final_training"]["actual_epochs"] == 3
+
+    metadata["windowing"]["inference_interval_seconds"] = 0.5
+    with pytest.raises(ValueError, match="windowing contract"):
+        validate_model_marker_v1(metadata)

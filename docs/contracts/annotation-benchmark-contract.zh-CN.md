@@ -170,6 +170,9 @@ benchmark-model-catalog/models/<release_id>/metadata.json
 
 - 来源实验的 `source_run_id`、源码 commit、`model_id`、`training_recipe`、数据/切分 fingerprint；
 - `selection_scope = "validation_only_oof"`、`metric_split = "validation_oof"` 与 `selection_eligible = true`；
+- 正数 `source_stride_seconds`；它是生成 OOF 选择证据时实际使用的决策步长，必须与模型
+  `windowing.inference_interval_seconds` 完全一致；训练窗口步长则从来源数据合同写入
+  `windowing.training_stride_seconds`，两者不得互相替代；
 - participant proof，包括 `status = "PASS"`、参与者总数、`appearances_per_participant = 1`、各 validation fold 的参与者数和 assignment SHA-256；
 - 阈值选择方法、触发策略选择方法及其确定性 tie-break；对应数值指标放在 `metrics`；
 - 若引用额外 selection artifact，必须给出可验证的不可变对象键、大小和 SHA-256。只写本地路径或文件名无效，且外部 artifact 不得取代上述内嵌摘要。

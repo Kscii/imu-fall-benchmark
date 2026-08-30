@@ -210,6 +210,7 @@ def validate_selection_evidence(value: object) -> dict[str, Any]:
         "selection_scope",
         "metric_split",
         "selection_eligible",
+        "source_stride_seconds",
         "participant_once",
         "threshold_selection",
         "trigger_policy_selection",
@@ -222,6 +223,11 @@ def validate_selection_evidence(value: object) -> dict[str, Any]:
         or evidence.get("selection_eligible") is not True
     ):
         raise ValueError("Selection evidence scope is invalid")
+    _finite(
+        evidence.get("source_stride_seconds"),
+        "selection source stride",
+        positive=True,
+    )
     if (
         not isinstance(evidence.get("source_run_id"), str)
         or _COMMIT.fullmatch(str(evidence.get("source_commit"))) is None
@@ -346,15 +352,24 @@ def validate_model_marker_v1(marker: dict[str, Any]) -> None:
     for value in scale:
         _finite(value, "normalization scale", positive=True)
     windowing = _object(marker.get("windowing"), "model windowing")
+    source_stride_seconds = _finite(
+        selection.get("source_stride_seconds"),
+        "selection source stride",
+        positive=True,
+    )
+    inference_interval_seconds = _finite(
+        windowing.get("inference_interval_seconds"),
+        "inference interval",
+        positive=True,
+    )
+    _finite(
+        windowing.get("training_stride_seconds"),
+        "training stride",
+        positive=True,
+    )
     if (
         _finite(windowing.get("window_seconds"), "window duration") != 2.0
-        or _finite(windowing.get("training_stride_seconds"), "training stride") != 0.5
-        or _finite(
-            windowing.get("inference_interval_seconds"),
-            "inference interval",
-            positive=True,
-        )
-        != 1.0
+        or inference_interval_seconds != source_stride_seconds
         or windowing.get("anchor") != "window_end"
         or windowing.get("reset_on") != ["new_sequence", "stream_gap"]
         or windowing.get("refill_frames_after_reset") != 50

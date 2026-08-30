@@ -58,6 +58,7 @@ def _release(tmp_path: Path) -> Path:
                     "selection_scope": "validation_only_oof",
                     "metric_split": "validation_oof",
                     "selection_eligible": True,
+                    "source_stride_seconds": 1.0,
                     "participant_once": {
                         "status": "PASS",
                         "participant_count": 5,
