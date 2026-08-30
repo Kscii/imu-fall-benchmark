@@ -25,10 +25,17 @@ def _store() -> UnifiedWindowStore:
         supervision_kind=np.asarray(["temporal"] * 4),
         sequence_is_fall=np.asarray([True, False, True, False]),
         sequence_fold_id=np.zeros(4, dtype=np.int8),
-        event_onset_sample=np.asarray([0, -1, 0, -1], dtype=np.int64),
-        event_impact_sample=np.asarray([25, -1, 25, -1], dtype=np.int64),
-        event_stop_sample=np.asarray([100, -1, 100, -1], dtype=np.int64),
-        manifest={"sampling_rate_hz": 25, "stride_seconds": 0.5, "windows": 8},
+        event_sequence_index=np.asarray([0, 2], dtype=np.int32),
+        event_onset_sample=np.asarray([0, 0], dtype=np.int64),
+        event_impact_sample=np.asarray([25, 25], dtype=np.int64),
+        event_stop_sample=np.asarray([100, 100], dtype=np.int64),
+        event_code=np.asarray(["fall", "fall"]),
+        manifest={
+            "sampling_rate_hz": 25,
+            "stride_seconds": 0.5,
+            "windows": 8,
+            "fall_events": 2,
+        },
     )
 
 

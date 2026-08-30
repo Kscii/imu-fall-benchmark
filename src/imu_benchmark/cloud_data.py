@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,7 @@ SUPPORTED_REMOTE_MANIFEST_SCHEMAS = {
     REMOTE_MANIFEST_SCHEMA,
 }
 CURRENT_SCHEMA = "imu_benchmark_current_v1"
-DATASET_HANDOFF_VERSION = "0.1.0"
+DATASET_HANDOFF_VERSION = "0.2.0"
 BASE_MANIFEST_PATH = Path("configs/data/base_imu25_v2.json")
 BASE_SPLITS_PATH = Path("configs/data/base_splits_v1.json")
 
@@ -130,14 +131,20 @@ def _validate_current(payload: dict[str, Any], *, kind: str) -> None:
         "manifest_sha256",
         "updated_at_utc",
     }
-    if kind == "team":
-        required.add("handoff_contract_version")
-    if set(payload) != required or payload.get("schema_version") != CURRENT_SCHEMA:
+    if not required.issubset(payload) or payload.get("schema_version") != CURRENT_SCHEMA:
         raise ValueError(f"Invalid {kind} current pointer")
     if payload.get("kind") != kind:
         raise ValueError(f"Current pointer kind differs: expected {kind}")
-    if kind == "team" and payload.get("handoff_contract_version") != DATASET_HANDOFF_VERSION:
-        raise ValueError("Team current pointer uses a different handoff contract")
+    if kind == "team":
+        version = payload.get("handoff_contract_version")
+        if version is None:
+            warnings.warn(
+                "Reading a legacy unversioned team current pointer in read-only mode",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        elif version != DATASET_HANDOFF_VERSION:
+            raise ValueError("Team current pointer uses a different handoff contract")
     for name in ("snapshot_id", "manifest_object", "updated_at_utc"):
         if not isinstance(payload.get(name), str) or not payload[name]:
             raise ValueError(f"Current pointer has invalid {name}")
@@ -152,11 +159,16 @@ def _validate_remote_manifest(payload: dict[str, Any], *, expected_kind: str) ->
         raise ValueError("Unsupported remote dataset manifest")
     if payload.get("kind") != expected_kind:
         raise ValueError("Remote manifest kind differs from current pointer")
-    if (
-        expected_kind == "team"
-        and payload.get("handoff_contract_version") != DATASET_HANDOFF_VERSION
-    ):
-        raise ValueError("Team manifest uses a different handoff contract")
+    if expected_kind == "team":
+        version = payload.get("handoff_contract_version")
+        if version is None:
+            warnings.warn(
+                "Reading a legacy unversioned team manifest in read-only mode",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        elif version != DATASET_HANDOFF_VERSION:
+            raise ValueError("Team manifest uses a different handoff contract")
     if payload.get("contract_version") != CONTRACT_VERSION:
         raise ValueError("Remote manifest uses a different benchmark contract")
     if not isinstance(payload.get("snapshot_id"), str) or not payload["snapshot_id"]:
@@ -279,8 +291,8 @@ def _remote_snapshot(
             "manifest_sha256": _sha256_bytes(manifest_bytes),
             "updated_at_utc": manifest["created_at_utc"],
         }
-        if kind == "team":
-            resolved["handoff_contract_version"] = DATASET_HANDOFF_VERSION
+        if kind == "team" and "handoff_contract_version" in manifest:
+            resolved["handoff_contract_version"] = manifest["handoff_contract_version"]
         return resolved, manifest
     current_bytes = _gcloud_cat(_object_uri(bucket, current_object), optional=optional)
     if current_bytes is None:
@@ -414,11 +426,7 @@ def _install_snapshot(
     active_entries = []
     for entry in manifest["files"]:
         active_entries.append(
-            {
-                key: value
-                for key, value in entry.items()
-                if key not in {"object_key", "filename"}
-            }
+            {key: value for key, value in entry.items() if key not in {"object_key", "filename"}}
             | {"path": str(entry["filename"])}
         )
     active_splits = None
@@ -491,9 +499,7 @@ def pull_data(
         if base_manifest["schema_version"] == REMOTE_MANIFEST_SCHEMA
         else "imu_benchmark_active_v1"
     )
-    active_splits = (
-        installed_splits if installed_splits is not None else _load_splits(project_root)
-    )
+    active_splits = installed_splits if installed_splits is not None else _load_splits(project_root)
     collections: dict[str, Any] = {
         "base": {
             "data_path": base_path,
@@ -597,8 +603,7 @@ def data_status(
         "remote_team_snapshot_id": None if team is None else team[1]["snapshot_id"],
         "update_available": active is None
         or active.get("base_snapshot_id") != base[1]["snapshot_id"]
-        or active.get("team_snapshot_id")
-        != (None if team is None else team[1]["snapshot_id"]),
+        or active.get("team_snapshot_id") != (None if team is None else team[1]["snapshot_id"]),
         "project_root": str(project_root),
     }
 
@@ -623,9 +628,7 @@ def publish_base(
     with reporter.task("Checking Google Cloud sign-in"):
         account = ensure_gcloud_login(interactive=True)
     bucket = data_bucket()
-    manifest_path = (
-        project_root / BASE_MANIFEST_PATH if manifest_path is None else manifest_path
-    )
+    manifest_path = project_root / BASE_MANIFEST_PATH if manifest_path is None else manifest_path
     split_dir = project_root / "data/splits" if split_dir is None else split_dir
     manifest_bytes = manifest_path.read_bytes()
     manifest = _read_json_bytes(manifest_bytes, source=str(manifest_path))
@@ -661,9 +664,7 @@ def publish_base(
                 immutable=True,
             )
             task.update(advance=1)
-    manifest_object = (
-        f"{BENCHMARK_PREFIX}/base/{manifest['snapshot_id']}/manifest.json"
-    )
+    manifest_object = f"{BENCHMARK_PREFIX}/base/{manifest['snapshot_id']}/manifest.json"
     _upload_file(
         manifest_path,
         _object_uri(bucket, manifest_object),
@@ -703,9 +704,7 @@ def activate_base(
     manifest_bytes = manifest_path.read_bytes()
     manifest = _read_json_bytes(manifest_bytes, source=str(manifest_path))
     _validate_remote_manifest(manifest, expected_kind="base")
-    manifest_object = (
-        f"{BENCHMARK_PREFIX}/base/{manifest['snapshot_id']}/manifest.json"
-    )
+    manifest_object = f"{BENCHMARK_PREFIX}/base/{manifest['snapshot_id']}/manifest.json"
     with reporter.task("Verifying the staged immutable base manifest"):
         remote_manifest_bytes = _gcloud_cat(
             _object_uri(bucket, manifest_object),
@@ -736,9 +735,7 @@ def activate_base(
                 "changed": False,
             }
         if existing["snapshot_id"] != expected_current_snapshot_id:
-            raise RuntimeError(
-                "The base current pointer changed after review; refusing activation"
-            )
+            raise RuntimeError("The base current pointer changed after review; refusing activation")
     elif expected_current_snapshot_id:
         raise RuntimeError("The expected base current pointer does not exist")
     with tempfile.NamedTemporaryFile("wb", suffix=".json", delete=False) as temporary:

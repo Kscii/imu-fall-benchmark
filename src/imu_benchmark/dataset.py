@@ -51,6 +51,8 @@ class Annotation:
 class FallEvent:
     onset_sample: int
     impact_sample: int
+    stop_sample: int
+    code: str
 
     @property
     def onset_time_s(self) -> float:
@@ -72,7 +74,13 @@ class IMURecording:
     supervision_kind: str
     values: np.ndarray
     annotations: tuple[Annotation, ...]
-    fall_event: FallEvent | None
+    fall_events: tuple[FallEvent, ...]
+
+    @property
+    def fall_event(self) -> FallEvent | None:
+        """Return the single event for legacy callers, otherwise no scalar event."""
+
+        return self.fall_events[0] if len(self.fall_events) == 1 else None
 
 
 def _text(value: object) -> str:
@@ -135,6 +143,49 @@ def _sequence_annotations(rows: np.ndarray, sequence_index: int) -> tuple[Annota
     )
 
 
+def _temporal_fall_events(annotations: tuple[Annotation, ...]) -> tuple[FallEvent, ...]:
+    """Pair each fall activity with its exact onset and in-interval impact."""
+
+    activities = tuple(item for item in annotations if item.kind == "activity")
+    onsets = tuple(item for item in annotations if item.kind == "onset")
+    impacts = tuple(item for item in annotations if item.kind == "impact")
+    events: list[FallEvent] = []
+    used_impacts: set[int] = set()
+    for onset in onsets:
+        matching_activities = tuple(
+            item
+            for item in activities
+            if item.start_sample == onset.start_sample
+            and item.stop_sample > onset.start_sample
+            and item.code == onset.code
+        )
+        if len(matching_activities) != 1:
+            raise ValueError("Each onset must match exactly one fall activity interval")
+        activity = matching_activities[0]
+        matching_impacts = tuple(
+            (index, item)
+            for index, item in enumerate(impacts)
+            if index not in used_impacts
+            and item.code == onset.code
+            and onset.start_sample < item.start_sample < activity.stop_sample
+        )
+        if len(matching_impacts) != 1:
+            raise ValueError("Each fall activity interval must contain exactly one impact")
+        impact_index, impact = matching_impacts[0]
+        used_impacts.add(impact_index)
+        events.append(
+            FallEvent(
+                onset_sample=onset.start_sample,
+                impact_sample=impact.start_sample,
+                stop_sample=activity.stop_sample,
+                code=onset.code,
+            )
+        )
+    if len(used_impacts) != len(impacts):
+        raise ValueError("Each impact must belong to exactly one fall activity interval")
+    return tuple(sorted(events, key=lambda item: (item.onset_sample, item.stop_sample, item.code)))
+
+
 def _check_annotation_rows(
     path: Path, sequence_rows: np.ndarray, annotation_rows: np.ndarray
 ) -> None:
@@ -187,13 +238,12 @@ def _check_annotation_rows(
             raise ValueError(
                 f"{path.name}: temporal activity/exclude intervals must cover the sequence"
             )
-        onsets = [item for item in annotations if item.kind == "onset"]
-        impacts = [item for item in annotations if item.kind == "impact"]
-        if bool(sequence["is_fall"]) != bool(onsets) or len(onsets) != len(impacts):
+        try:
+            events = _temporal_fall_events(annotations)
+        except ValueError as error:
+            raise ValueError(f"{path.name}: {error}") from error
+        if bool(sequence["is_fall"]) != bool(events):
             raise ValueError(f"{path.name}: temporal event labels are inconsistent")
-        for onset, impact in zip(onsets, impacts, strict=True):
-            if onset.code != impact.code or onset.start_sample >= impact.start_sample:
-                raise ValueError(f"{path.name}: temporal onset/impact order is invalid")
 
 
 def _check_file(path: Path) -> dict[str, object]:
@@ -366,9 +416,7 @@ def _validate_collection(
     entries = collection["datasets"]
     if not isinstance(entries, list):
         raise ValueError("Invalid snapshot dataset entries")
-    entry_by_id = {
-        str(item["dataset_id"]): item for item in entries if isinstance(item, dict)
-    }
+    entry_by_id = {str(item["dataset_id"]): item for item in entries if isinstance(item, dict)}
     expected_ids = tuple(entry_by_id)
     totals = {"sequences": 0, "rows": 0, "annotations": 0, "events": 0, "segments": 0}
     participants: set[tuple[str, str]] = set()
@@ -394,9 +442,7 @@ def _validate_collection(
             dataset_participants = result.pop("participants")
             if not isinstance(dataset_participants, set):
                 raise ValueError(f"Invalid participant summary for {dataset_id}")
-            if "participants" in entry and len(dataset_participants) != int(
-                entry["participants"]
-            ):
+            if "participants" in entry and len(dataset_participants) != int(entry["participants"]):
                 raise ValueError(f"Participant count mismatch for {dataset_id}")
             for field in (
                 "sequences",
@@ -518,11 +564,11 @@ def iter_recordings(
                     raise ValueError(f"Duplicate location sequence: {key}")
                 seen.add(key)
                 rows = _sequence_annotations(annotations, index)
-                onsets = [item for item in rows if item.kind == "onset"]
-                impacts = [item for item in rows if item.kind == "impact"]
-                event = None
-                if len(onsets) == len(impacts) == 1:
-                    event = FallEvent(onsets[0].start_sample, impacts[0].start_sample)
+                events = (
+                    _temporal_fall_events(rows)
+                    if _text(row["supervision_kind"]) == "temporal"
+                    else ()
+                )
                 start = int(row["sample_start"])
                 stop = int(row["sample_stop"])
                 yield IMURecording(
@@ -535,5 +581,5 @@ def iter_recordings(
                     supervision_kind=_text(row["supervision_kind"]),
                     values=np.asarray(handle["samples"][start:stop], dtype=np.float32),
                     annotations=rows,
-                    fall_event=event,
+                    fall_events=events,
                 )

@@ -19,7 +19,7 @@ from .performance import PhaseTimer
 from .progress import NullProgressReporter, ProgressReporter
 from .protocol import segment_decision_time_labels
 
-WINDOW_CACHE_SCHEMA = "unified_fall_windows_v4_25hz"
+WINDOW_CACHE_SCHEMA = "unified_fall_windows_v5_25hz"
 
 
 def _text_array(dataset: h5py.Dataset) -> np.ndarray:
@@ -35,9 +35,7 @@ def _split_assignments(
 ) -> dict[tuple[str, str], int]:
     result: dict[tuple[str, str], int] = {}
     split_root = (
-        project_root
-        if snapshot["schema_version"] == "imu_benchmark_active_v1"
-        else active_root
+        project_root if snapshot["schema_version"] == "imu_benchmark_active_v1" else active_root
     )
     for split in snapshot["collections"]["base"]["splits"]:
         path = split_root / split["path"]
@@ -250,16 +248,24 @@ def prepare_unified_window_store(
                 sequences.create_dataset(
                     name, shape=(0,), maxshape=(None,), dtype=text_dtype, chunks=True
                 )
-            for name, dtype in (
-                ("is_fall", "?"),
-                ("fold_id", "i1"),
-                ("event_onset_sample", "i8"),
-                ("event_impact_sample", "i8"),
-                ("event_stop_sample", "i8"),
-            ):
+            for name, dtype in (("is_fall", "?"), ("fold_id", "i1")):
                 sequences.create_dataset(
                     name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=True
                 )
+
+            events_group = handle.create_group("events")
+            for name, dtype in (
+                ("sequence_index", "i4"),
+                ("onset_sample", "i8"),
+                ("impact_sample", "i8"),
+                ("stop_sample", "i8"),
+            ):
+                events_group.create_dataset(
+                    name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=True
+                )
+            events_group.create_dataset(
+                "code", shape=(0,), maxshape=(None,), dtype=text_dtype, chunks=True
+            )
 
             windows_group = handle.create_group("windows")
             window_datasets = {
@@ -322,7 +328,6 @@ def prepare_unified_window_store(
                 ends = starts + window_samples
                 temporal = np.full(len(starts), -1, dtype=np.int8)
                 keep = np.ones(len(starts), dtype=np.bool_)
-                event_stop = -1
                 with phases.track("window_label_seconds"):
                     if recording.supervision_kind == "temporal":
                         temporal, keep, intervals = segment_decision_time_labels(
@@ -353,8 +358,6 @@ def prepare_unified_window_store(
                         dataset_skipped_post_segment[recording.dataset_id] = (
                             dataset_skipped_post_segment.get(recording.dataset_id, 0) + skipped_post
                         )
-                        if intervals:
-                            event_stop = int(intervals[0][1])
                     elif not recording.is_fall:
                         temporal[:] = 0
                     raw = raw[keep]
@@ -362,7 +365,15 @@ def prepare_unified_window_store(
                     ends = ends[keep]
                     temporal = temporal[keep]
                 if recording.supervision_kind == "temporal" and recording.is_fall:
-                    missing_positive = int(not np.any(temporal == 1))
+                    decisions = ends - 1
+                    missing_positive = sum(
+                        int(
+                            not np.any(
+                                (decisions >= event.onset_sample) & (decisions < event.stop_sample)
+                            )
+                        )
+                        for event in recording.fall_events
+                    )
                     events_without_positive_window += missing_positive
                     dataset_events_without_positive[recording.dataset_id] = (
                         dataset_events_without_positive.get(recording.dataset_id, 0)
@@ -373,8 +384,6 @@ def prepare_unified_window_store(
                         features = extract_window_features(raw, sampling_rate_hz)
                 else:
                     features = np.empty((0, len(FEATURE_NAMES)), dtype=np.float32)
-                onset = recording.fall_event.onset_sample if recording.fall_event else -1
-                impact = recording.fall_event.impact_sample if recording.fall_event else -1
                 with phases.track("sequence_metadata_write_seconds"):
                     for name, value in (
                         ("dataset_id", recording.dataset_id),
@@ -385,11 +394,24 @@ def prepare_unified_window_store(
                         ("supervision_kind", recording.supervision_kind),
                         ("is_fall", recording.is_fall),
                         ("fold_id", fold),
-                        ("event_onset_sample", onset),
-                        ("event_impact_sample", impact),
-                        ("event_stop_sample", event_stop),
                     ):
                         _resize_write(sequences[name], np.asarray([value]))
+                    if recording.fall_events:
+                        count = len(recording.fall_events)
+                        _resize_write(
+                            events_group["sequence_index"],
+                            np.full(count, sequence_count, dtype=np.int32),
+                        )
+                        for name, values in (
+                            ("onset_sample", [item.onset_sample for item in recording.fall_events]),
+                            (
+                                "impact_sample",
+                                [item.impact_sample for item in recording.fall_events],
+                            ),
+                            ("stop_sample", [item.stop_sample for item in recording.fall_events]),
+                            ("code", [item.code for item in recording.fall_events]),
+                        ):
+                            _resize_write(events_group[name], np.asarray(values))
                 with phases.track("cache_hdf5_write_seconds"):
                     buffer.append(
                         {
@@ -462,7 +484,6 @@ def prepare_unified_window_store(
                 "build_seconds": build_seconds,
                 "build_phase_seconds": phase_seconds,
             }
-            handle.attrs["manifest_json"] = json.dumps(manifest, sort_keys=True)
             if "kfall" in dataset_windows:
                 manifest["kfall_regression_candidate"] = {
                     "windows": dataset_windows["kfall"],
@@ -476,6 +497,7 @@ def prepare_unified_window_store(
                         "kfall", 0
                     ),
                 }
+            handle.attrs["manifest_json"] = json.dumps(manifest, sort_keys=True)
             handle.flush()
         os.replace(temporary, destination)
     except BaseException:
@@ -501,9 +523,11 @@ class UnifiedWindowStore:
     supervision_kind: np.ndarray
     sequence_is_fall: np.ndarray
     sequence_fold_id: np.ndarray
+    event_sequence_index: np.ndarray
     event_onset_sample: np.ndarray
     event_impact_sample: np.ndarray
     event_stop_sample: np.ndarray
+    event_code: np.ndarray
     manifest: dict[str, Any]
 
     @property
@@ -541,13 +565,31 @@ def load_unified_window_store(path: Path) -> UnifiedWindowStore:
             supervision_kind=_text_array(handle["sequences/supervision_kind"]),
             sequence_is_fall=np.asarray(handle["sequences/is_fall"], dtype=np.bool_),
             sequence_fold_id=np.asarray(handle["sequences/fold_id"], dtype=np.int8),
-            event_onset_sample=np.asarray(handle["sequences/event_onset_sample"], dtype=np.int64),
-            event_impact_sample=np.asarray(handle["sequences/event_impact_sample"], dtype=np.int64),
-            event_stop_sample=np.asarray(handle["sequences/event_stop_sample"], dtype=np.int64),
+            event_sequence_index=np.asarray(handle["events/sequence_index"], dtype=np.int32),
+            event_onset_sample=np.asarray(handle["events/onset_sample"], dtype=np.int64),
+            event_impact_sample=np.asarray(handle["events/impact_sample"], dtype=np.int64),
+            event_stop_sample=np.asarray(handle["events/stop_sample"], dtype=np.int64),
+            event_code=_text_array(handle["events/code"]),
             manifest=manifest,
         )
     if store.size != manifest["windows"]:
         raise ValueError("Unified cache size does not match its manifest")
     if np.any(store.end_sample - store.start_sample != manifest["window_samples"]):
         raise ValueError("Unified cache contains invalid window lengths")
+    event_lengths = {
+        len(store.event_sequence_index),
+        len(store.event_onset_sample),
+        len(store.event_impact_sample),
+        len(store.event_stop_sample),
+        len(store.event_code),
+    }
+    if event_lengths != {int(manifest["fall_events"])}:
+        raise ValueError("Unified cache event table does not match its manifest")
+    if np.any(
+        (store.event_sequence_index < 0)
+        | (store.event_sequence_index >= len(store.dataset_id))
+        | (store.event_onset_sample >= store.event_impact_sample)
+        | (store.event_impact_sample >= store.event_stop_sample)
+    ):
+        raise ValueError("Unified cache contains invalid fall events")
     return store
