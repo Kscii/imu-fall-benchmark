@@ -223,8 +223,9 @@ objects are not upgraded in place. Publish a separate read-only web catalog only
 the corresponding result has been verified:
 
 ```bash
-imu-bench experiments publish <run-id>
-imu-bench experiments verify <run-id>
+imu-bench experiments publish <run-id> \
+  --publication-id <run-id>-catalog-v1
+imu-bench experiments verify <run-id>-catalog-v1
 ```
 
 The independent v1 catalog is stored under
