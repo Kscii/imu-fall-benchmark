@@ -16,6 +16,7 @@ from .cloud_experiments import (
     verify_experiment_catalog,
 )
 from .cloud_models import (
+    package_model_release,
     publish_model_release,
     restore_model_release,
     verify_model_release,
@@ -251,6 +252,11 @@ def _parser() -> argparse.ArgumentParser:
         "models", help="Publish or verify immutable two-file ONNX model releases"
     )
     model_commands = models.add_subparsers(dest="models_command", required=True)
+    model_package = model_commands.add_parser(
+        "package", help="Build a strict model.onnx + metadata.json release directory"
+    )
+    model_package.add_argument("spec", type=Path)
+    model_package.add_argument("output_dir", type=Path)
     model_publish = model_commands.add_parser(
         "publish", help="Validate and publish one model.onnx + metadata.json directory"
     )
@@ -359,6 +365,8 @@ def _dispatch(args: argparse.Namespace, reporter: ProgressReporter) -> dict[str,
             f"Unhandled experiments command: {args.experiments_command}"
         )
     if args.command == "models":
+        if args.models_command == "package":
+            return package_model_release(args.spec, args.output_dir)
         if args.models_command == "publish":
             return publish_model_release(args.release_dir, progress=reporter)
         if args.models_command == "verify":

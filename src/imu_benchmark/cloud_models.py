@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import onnx
 import onnxruntime as ort
+import yaml
 
+from .artifact_contract import (
+    MODEL_CONTRACT_VERSION,
+    MODEL_SCHEMA_V1,
+    require_compatible_version,
+    validate_model_marker_v1,
+)
 from .cloud_data import (
     _gcloud_cat,
     _object_uri,
@@ -21,8 +30,8 @@ from .cloud_data import (
 from .model_broker import publish_model_artifacts, restore_model_publication
 from .progress import NullProgressReporter, ProgressReporter
 
-MODEL_RELEASE_SCHEMA = "imu_model_release_v0"
-MODEL_RELEASE_CONTRACT_VERSION = "0.1.0"
+MODEL_RELEASE_SCHEMA = MODEL_SCHEMA_V1
+MODEL_RELEASE_CONTRACT_VERSION = MODEL_CONTRACT_VERSION
 MODEL_RELEASE_PREFIX = "benchmark-model-catalog/models"
 REQUIRED_FILES = ("metadata.json", "model.onnx")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
@@ -54,70 +63,38 @@ def _validate_metadata(root: Path) -> dict[str, Any]:
         "model_code",
         "name",
         "created_at_utc",
+        "release_stage",
         "source",
         "data",
         "input",
         "output",
         "preprocessing",
+        "windowing",
         "decision",
         "metrics",
+        "verification",
         "validation",
         "known_limitations",
         "model",
     }
     if set(metadata) != required:
         raise ValueError("Model release metadata fields differ from the contract")
-    if (
-        metadata.get("schema_version") != MODEL_RELEASE_SCHEMA
-        or metadata.get("contract_version") != MODEL_RELEASE_CONTRACT_VERSION
-    ):
+    if metadata.get("schema_version") != MODEL_RELEASE_SCHEMA:
         raise ValueError("Model release metadata schema is invalid")
+    require_compatible_version(
+        metadata.get("contract_version"),
+        MODEL_RELEASE_CONTRACT_VERSION,
+        name="model release contract version",
+    )
     for name in ("release_id", "model_code"):
         value = metadata.get(name)
         if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
             raise ValueError(f"Model release {name} is invalid")
     if not isinstance(metadata.get("name"), str) or not metadata["name"].strip():
         raise ValueError("Model release name is missing")
-    for name in ("source", "data", "input", "output", "preprocessing", "metrics"):
-        _nonempty_object(metadata.get(name), name)
-    source = metadata["source"]
-    if source.get("dirty") is not False or not source.get("commit"):
-        raise ValueError("Model release requires a clean source commit")
-    output = metadata["output"]
-    if output.get("semantic") != "fall_score" or output.get("dtype") != "float32":
-        raise ValueError("Model release output contract is invalid")
-    decision = _nonempty_object(metadata.get("decision"), "decision")
-    threshold = _nonempty_object(decision.get("score_threshold"), "score threshold")
-    if (
-        not isinstance(threshold.get("value"), (int, float))
-        or threshold.get("comparison") != ">="
-        or decision.get("anchor") != "window_end"
-    ):
-        raise ValueError("Model release score threshold is invalid")
-    trigger = _nonempty_object(decision.get("trigger_policy"), "trigger policy")
-    trigger_required = {
-        "policy_id",
-        "required_positive_windows",
-        "lookback_windows",
-        "consecutive",
-        "cooldown_seconds",
-    }
-    if not trigger_required.issubset(trigger):
-        raise ValueError("Model release trigger policy is incomplete")
-    validation = _nonempty_object(metadata.get("validation"), "validation")
-    if (
-        validation.get("onnx_checker") != "PASS"
-        or validation.get("python_onnxruntime_parity") != "PASS"
-        or validation.get("external_runtime") not in {"PASS", "not_tested"}
-        or validation.get("device_replay") not in {"PASS", "not_tested"}
-    ):
-        raise ValueError("Model release validation status is invalid")
-    if not isinstance(metadata.get("known_limitations"), list):
-        raise ValueError("Model release known_limitations is invalid")
+    validate_model_marker_v1(metadata)
     descriptor = _nonempty_object(metadata.get("model"), "model descriptor")
-    expected_key = (
-        f"{MODEL_RELEASE_PREFIX}/{metadata['release_id']}/model.onnx"
-    )
+    expected_key = f"{MODEL_RELEASE_PREFIX}/{metadata['release_id']}/model.onnx"
     if (
         descriptor.get("filename") != "model.onnx"
         or descriptor.get("object_key") != expected_key
@@ -144,6 +121,27 @@ def _validate_onnx(root: Path, metadata: dict[str, Any]) -> None:
         or session.get_outputs()[0].name != expected_output
     ):
         raise ValueError("Model release ONNX names differ from metadata")
+    input_info = session.get_inputs()[0]
+    output_info = session.get_outputs()[0]
+    if (
+        input_info.type != "tensor(float)"
+        or list(input_info.shape[1:]) != [50, 6]
+        or output_info.type != "tensor(float)"
+        or len(output_info.shape) != 1
+    ):
+        raise ValueError("Model release ONNX shape or dtype differs from metadata")
+    for fixture in metadata["verification"]["golden_fixtures"]:
+        values = np.asarray(fixture["input_values"], dtype=np.float32)[None, :, :]
+        output = np.asarray(session.run([expected_output], {expected_input: values})[0])
+        if output.shape != (1,):
+            raise ValueError("Golden fixture produced an invalid fall_score shape")
+        if not np.isclose(
+            float(output[0]),
+            float(fixture["expected_fall_score"]),
+            rtol=float(fixture["rtol"]),
+            atol=float(fixture["atol"]),
+        ):
+            raise ValueError(f"Golden fixture failed: {fixture['fixture_id']}")
 
 
 def validate_model_release(release_dir: Path) -> dict[str, Any]:
@@ -163,6 +161,104 @@ def validate_model_release(release_dir: Path) -> dict[str, Any]:
         raise ValueError("Model release ONNX differs from metadata")
     _validate_onnx(root, metadata)
     return metadata
+
+
+def _package_fixtures(
+    session: ort.InferenceSession,
+    input_name: str,
+    output_name: str,
+) -> list[dict[str, Any]]:
+    time = np.arange(50, dtype=np.float32) / 25.0
+    stationary = np.zeros((50, 6), dtype=np.float32)
+    stationary[:, 2] = np.float32(9.80665)
+    adl = stationary.copy()
+    adl[:, 0] = np.sin(2.0 * np.pi * time).astype(np.float32) * 1.2
+    adl[:, 1] = np.cos(2.0 * np.pi * time).astype(np.float32) * 0.8
+    adl[:, 5] = np.sin(np.pi * time).astype(np.float32) * 0.4
+    impact = stationary.copy()
+    impact[24:27, 0] = np.asarray([6.0, 18.0, 5.0], dtype=np.float32)
+    impact[24:27, 2] = np.asarray([2.0, 28.0, 7.0], dtype=np.float32)
+    impact[24:27, 4] = np.asarray([1.5, 4.0, 1.0], dtype=np.float32)
+    fixtures = []
+    for fixture_id, values in (
+        ("stationary", stationary),
+        ("adl_like", adl),
+        ("impact_like", impact),
+    ):
+        score = np.asarray(session.run([output_name], {input_name: values[None, :, :]})[0])
+        if score.shape != (1,) or not np.isfinite(score[0]):
+            raise ValueError(f"Cannot produce golden fixture: {fixture_id}")
+        fixtures.append(
+            {
+                "fixture_id": fixture_id,
+                "input_values": values.tolist(),
+                "expected_fall_score": float(score[0]),
+                "rtol": 1e-5,
+                "atol": 1e-5,
+            }
+        )
+    return fixtures
+
+
+def package_model_release(spec_path: Path, output_dir: Path) -> dict[str, Any]:
+    """Build the immutable two-file payload from one reviewable package spec."""
+
+    try:
+        spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, yaml.YAMLError) as error:
+        raise ValueError("Invalid model package spec") from error
+    if not isinstance(spec, dict) or set(spec) != {
+        "schema_version",
+        "model_path",
+        "metadata",
+    }:
+        raise ValueError("Model package spec fields differ from the contract")
+    if spec.get("schema_version") != "imu_model_package_spec_v1":
+        raise ValueError("Model package spec schema is invalid")
+    metadata = spec.get("metadata")
+    if not isinstance(metadata, dict) or "model" in metadata or "verification" in metadata:
+        raise ValueError("Package metadata must omit generated model and verification fields")
+    source_path = (spec_path.parent / str(spec["model_path"])).resolve()
+    if not source_path.is_file():
+        raise ValueError("Package model_path does not exist")
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise ValueError("Model package output directory must be empty")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    model_path = output_dir / "model.onnx"
+    shutil.copyfile(source_path, model_path)
+    onnx.checker.check_model(onnx.load(model_path))
+    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+    if len(session.get_inputs()) != 1 or len(session.get_outputs()) != 1:
+        raise ValueError("Model package ONNX must have exactly one input and output")
+    input_name = str(metadata.get("input", {}).get("name") or "")
+    output_name = str(metadata.get("output", {}).get("name") or "")
+    if session.get_inputs()[0].name != input_name or session.get_outputs()[0].name != output_name:
+        raise ValueError("Model package ONNX names differ from metadata")
+    release_id = metadata.get("release_id")
+    if not isinstance(release_id, str) or not _IDENTIFIER.fullmatch(release_id):
+        raise ValueError("Model package release_id is invalid")
+    completed = {
+        **metadata,
+        "verification": {"golden_fixtures": _package_fixtures(session, input_name, output_name)},
+        "model": {
+            "filename": "model.onnx",
+            "object_key": f"{MODEL_RELEASE_PREFIX}/{release_id}/model.onnx",
+            "size_bytes": model_path.stat().st_size,
+            "sha256": _sha256_file(model_path),
+            "content_type": "application/octet-stream",
+        },
+    }
+    (output_dir / "metadata.json").write_text(
+        json.dumps(completed, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    validate_model_release(output_dir)
+    return {
+        "status": "PASS",
+        "release_id": release_id,
+        "output_dir": str(output_dir.resolve()),
+        "model_sha256": completed["model"]["sha256"],
+    }
 
 
 def publish_model_release(
@@ -229,12 +325,8 @@ def verify_model_release(release_id: str) -> dict[str, Any]:
     }
 
 
-def restore_model_release(
-    release_id: str, *, expected_generation: int
-) -> dict[str, Any]:
+def restore_model_release(release_id: str, *, expected_generation: int) -> dict[str, Any]:
     if not _IDENTIFIER.fullmatch(release_id):
         raise ValueError("Invalid model release ID")
     ensure_gcloud_login(interactive=False)
-    return restore_model_publication(
-        "model", release_id, expected_generation=expected_generation
-    )
+    return restore_model_publication("model", release_id, expected_generation=expected_generation)

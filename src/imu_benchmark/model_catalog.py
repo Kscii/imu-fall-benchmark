@@ -13,11 +13,14 @@ from typing import Any
 
 import yaml
 
+from .artifact_contract import (
+    EXPERIMENT_CATALOG_CONTRACT_VERSION,
+    EXPERIMENT_SCHEMA_V1,
+)
 from .data import FEATURE_NAMES
 
 EXPERIMENT_PUBLICATION_SCHEMA = "imu_benchmark_result_manifest_v2"
-EXPERIMENT_CATALOG_SCHEMA = "imu_experiment_catalog_v0"
-EXPERIMENT_CATALOG_CONTRACT_VERSION = "0.1.0"
+EXPERIMENT_CATALOG_SCHEMA = EXPERIMENT_SCHEMA_V1
 FORMAL_EXPERIMENT_ID = "formal_baseline_temporal_core_onnx_v1"
 ENGINEERING_EXPERIMENT_ID = "onnx_full_parity_preflight_v1"
 EVIDENCE_LEVELS = {
@@ -323,6 +326,7 @@ def build_experiment_catalog(
         artifacts.append(
             {
                 "artifact_id": artifact_id,
+                "method_id": f"{key[0]}--{key[1]}",
                 "model_id": key[0],
                 "training_recipe": key[1],
                 "fold": key[2],
@@ -337,6 +341,8 @@ def build_experiment_catalog(
                     "probability_calibrated": False,
                 },
                 "metrics": {
+                    "metric_split": "test",
+                    "selection_eligible": False,
                     "window": _metric_values(metrics[key], WINDOW_METRICS),
                     "event": _metric_values(events[key], EVENT_METRICS),
                     "alarm": {
@@ -409,6 +415,8 @@ def build_experiment_catalog(
                 "model_id": model_id,
                 "training_recipe": recipe,
                 "fold_count": len(members),
+                "metric_split": "test",
+                "selection_eligible": False,
                 "input_semantic": members[0]["input"]["semantic"],
                 "metrics": aggregates,
                 "artifact_ids": [
@@ -418,7 +426,7 @@ def build_experiment_catalog(
             }
         )
 
-    return {
+    catalog = {
         "schema_version": EXPERIMENT_CATALOG_SCHEMA,
         "contract_version": EXPERIMENT_CATALOG_CONTRACT_VERSION,
         "evidence_level": evidence_level,
@@ -426,3 +434,6 @@ def build_experiment_catalog(
         "methods": methods,
         "artifacts": artifacts,
     }
+    # Validate the display-ready core before the cloud publisher adds provenance
+    # and result descriptors around it.
+    return catalog

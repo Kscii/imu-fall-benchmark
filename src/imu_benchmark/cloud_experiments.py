@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .artifact_contract import validate_experiment_marker_v1
 from .cloud_data import (
     _gcloud_cat,
     _object_uri,
@@ -30,6 +31,13 @@ EXPERIMENT_CATALOG_PREFIX = "benchmark-model-catalog/experiments"
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
 
 
+def experiment_publication_id(run_id: str) -> str:
+    value = f"{run_id}-catalog-v1"
+    if not _IDENTIFIER.fullmatch(value):
+        raise ValueError("Derived experiment publication ID is invalid")
+    return value
+
+
 def _json_bytes(value: object) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
 
@@ -47,7 +55,7 @@ def _metadata(
     run_manifest: dict[str, Any],
     result_manifest: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Path]]:
-    publication_id = str(run_manifest["run_id"])
+    publication_id = experiment_publication_id(str(run_manifest["run_id"]))
     prefix = f"{EXPERIMENT_CATALOG_PREFIX}/{publication_id}"
     catalog = build_experiment_catalog(run_dir, run_manifest)
     uploads: list[dict[str, Any]] = []
@@ -117,6 +125,7 @@ def _metadata(
         "result_evidence": result_evidence,
         "known_limitations": list(run_manifest.get("known_limitations") or []),
     }
+    validate_experiment_marker_v1(metadata)
     return metadata, uploads, sources
 
 
@@ -136,25 +145,24 @@ def publish_experiment_catalog(
     with reporter.task("Verifying the immutable benchmark result evidence"):
         result_manifest = _remote_manifest(bucket, run_id)
     with reporter.task("Building the independent experiment catalog"):
-        metadata, uploads, sources = _metadata(
-            run_dir, run_manifest, result_manifest
-        )
+        metadata, uploads, sources = _metadata(run_dir, run_manifest, result_manifest)
+    publication_id = metadata["publication_id"]
     with reporter.task("Uploading ONNX files and writing metadata last"):
         completed = publish_model_artifacts(
             publication_kind="experiment",
-            publication_id=run_id,
+            publication_id=publication_id,
             marker=metadata,
             artifacts=uploads,
             sources=sources,
         )
-    expected = f"{EXPERIMENT_CATALOG_PREFIX}/{run_id}/metadata.json"
+    expected = f"{EXPERIMENT_CATALOG_PREFIX}/{publication_id}/metadata.json"
     if completed.get("marker_object") != expected:
         raise ValueError("Upload broker completed an unexpected experiment catalog")
     return {
         "status": "PASS",
         "account": account,
         "bucket": bucket,
-        "publication_id": run_id,
+        "publication_id": publication_id,
         "metadata_object": expected,
         "onnx_artifacts": len(uploads),
     }
@@ -187,9 +195,7 @@ def verify_experiment_catalog(publication_id: str) -> dict[str, Any]:
     }
 
 
-def restore_experiment_catalog(
-    publication_id: str, *, expected_generation: int
-) -> dict[str, Any]:
+def restore_experiment_catalog(publication_id: str, *, expected_generation: int) -> dict[str, Any]:
     if not _IDENTIFIER.fullmatch(publication_id):
         raise ValueError("Invalid experiment publication ID")
     ensure_gcloud_login(interactive=False)
