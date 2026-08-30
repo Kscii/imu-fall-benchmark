@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -10,6 +11,8 @@ import tempfile
 import warnings
 from pathlib import Path
 from typing import Any
+
+import h5py
 
 from .contract import (
     ACTIVE_SCHEMA_VERSION,
@@ -28,7 +31,8 @@ SUPPORTED_REMOTE_MANIFEST_SCHEMAS = {
     REMOTE_MANIFEST_SCHEMA,
 }
 CURRENT_SCHEMA = "imu_benchmark_current_v1"
-DATASET_HANDOFF_VERSION = "0.2.0"
+DATASET_HANDOFF_VERSION = "0.3.0"
+LEGACY_TEAM_HANDOFF_VERSIONS = {"0.1.0", "0.2.0"}
 BASE_MANIFEST_PATH = Path("configs/data/base_imu25_v2.json")
 BASE_SPLITS_PATH = Path("configs/data/base_splits_v1.json")
 
@@ -143,6 +147,12 @@ def _validate_current(payload: dict[str, Any], *, kind: str) -> None:
                 RuntimeWarning,
                 stacklevel=2,
             )
+        elif version in LEGACY_TEAM_HANDOFF_VERSIONS:
+            warnings.warn(
+                f"Reading legacy team handoff {version} in read-only mode",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         elif version != DATASET_HANDOFF_VERSION:
             raise ValueError("Team current pointer uses a different handoff contract")
     for name in ("snapshot_id", "manifest_object", "updated_at_utc"):
@@ -164,6 +174,12 @@ def _validate_remote_manifest(payload: dict[str, Any], *, expected_kind: str) ->
         if version is None:
             warnings.warn(
                 "Reading a legacy unversioned team manifest in read-only mode",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        elif version in LEGACY_TEAM_HANDOFF_VERSIONS:
+            warnings.warn(
+                f"Reading legacy team handoff {version} in read-only mode",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -313,12 +329,30 @@ def _remote_snapshot(
     return current, manifest
 
 
-def _validate_local_file(path: Path, entry: dict[str, Any]) -> None:
+def _validate_local_file(
+    path: Path,
+    entry: dict[str, Any],
+    *,
+    require_anonymous_subjects: bool = False,
+) -> None:
     if not path.is_file() or path.stat().st_size != int(entry["size_bytes"]):
         raise ValueError(f"Local dataset size mismatch: {path}")
     if _sha256_file(path) != entry["sha256"]:
         raise ValueError(f"Local dataset SHA-256 mismatch: {path}")
     observed = validate_hdf5_file(path)
+    if require_anonymous_subjects:
+        with h5py.File(path, "r") as handle:
+            participant_ids = {
+                value.decode("utf-8") if isinstance(value, bytes) else str(value)
+                for value in handle["sequences"]["participant_id"]
+            }
+        invalid = sorted(
+            value
+            for value in participant_ids
+            if re.fullmatch(r"cw12eu:subject-[0-9]{3,}", value) is None
+        )
+        if invalid:
+            raise ValueError("Team HDF5 contains non-anonymous participant identities")
     for name in (
         "dataset_id",
         "sequences",
@@ -360,7 +394,15 @@ def _install_snapshot(
         ) as task:
             for entry in manifest["files"]:
                 task.update(detail=str(entry["filename"]))
-                _validate_local_file(datasets / str(entry["filename"]), entry)
+                _validate_local_file(
+                    datasets / str(entry["filename"]),
+                    entry,
+                    require_anonymous_subjects=(
+                        kind == "team"
+                        and manifest.get("handoff_contract_version")
+                        == DATASET_HANDOFF_VERSION
+                    ),
+                )
                 task.update(advance=1)
         if isinstance(split_entries, list):
             with progress.task(
@@ -398,7 +440,15 @@ def _install_snapshot(
                         _object_uri(bucket, str(entry["object_key"])),
                         str(destination),
                     )
-                    _validate_local_file(destination, entry)
+                    _validate_local_file(
+                        destination,
+                        entry,
+                        require_anonymous_subjects=(
+                            kind == "team"
+                            and manifest.get("handoff_contract_version")
+                            == DATASET_HANDOFF_VERSION
+                        ),
+                    )
                     task.update(advance=int(entry["size_bytes"]))
             if isinstance(split_entries, list):
                 total_split_bytes = sum(int(entry["size_bytes"]) for entry in split_entries)
