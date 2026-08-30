@@ -29,6 +29,7 @@ def _store_with_team_training_data() -> UnifiedWindowStore:
     temporal = np.concatenate((labels, np.asarray([0, 1], dtype=np.int8)))
     count = len(sequence_folds)
     sequence = np.arange(count, dtype=np.int32)
+    event_sequences = np.flatnonzero(temporal).astype(np.int32)
     return UnifiedWindowStore(
         path=Path("unused.h5"),
         sequence_index=sequence,
@@ -44,10 +45,17 @@ def _store_with_team_training_data() -> UnifiedWindowStore:
         supervision_kind=np.asarray(["temporal"] * count),
         sequence_is_fall=temporal.astype(np.bool_),
         sequence_fold_id=sequence_folds,
-        event_onset_sample=np.zeros(count, dtype=np.int64),
-        event_impact_sample=np.full(count, 25, dtype=np.int64),
-        event_stop_sample=np.full(count, 50, dtype=np.int64),
-        manifest={"sampling_rate_hz": 25, "stride_seconds": 0.5, "windows": count},
+        event_sequence_index=event_sequences,
+        event_onset_sample=np.zeros(len(event_sequences), dtype=np.int64),
+        event_impact_sample=np.full(len(event_sequences), 25, dtype=np.int64),
+        event_stop_sample=np.full(len(event_sequences), 50, dtype=np.int64),
+        event_code=np.asarray(["fall"] * len(event_sequences)),
+        manifest={
+            "sampling_rate_hz": 25,
+            "stride_seconds": 0.5,
+            "windows": count,
+            "fall_events": len(event_sequences),
+        },
     )
 
 
@@ -69,8 +77,7 @@ def test_temporal_core_onnx_plan_contains_65_full_parity_jobs(
 ) -> None:
     config = load_experiment(
         PROJECT_ROOT,
-        PROJECT_ROOT
-        / "configs/experiments/formal_baseline_temporal_core_onnx_v1.yaml",
+        PROJECT_ROOT / "configs/experiments/formal_baseline_temporal_core_onnx_v1.yaml",
         snapshot_path=active_manifest_path,
     )
     result = plan_experiment(config)
@@ -190,9 +197,7 @@ def test_exact_snapshot_resolution_does_not_read_current_pointer(
     assert resolved is not None
     current, manifest = resolved
     assert manifest["snapshot_id"] == "imu_25hz_snapshot_v2"
-    assert current["manifest_object"].endswith(
-        "/base/imu_25hz_snapshot_v2/manifest.json"
-    )
+    assert current["manifest_object"].endswith("/base/imu_25hz_snapshot_v2/manifest.json")
     assert all(not uri.endswith("/current.json") for uri, _ in requested)
 
 
@@ -204,7 +209,7 @@ def test_exact_team_snapshot_preserves_collection_prefix(
     )
     manifest["kind"] = "team"
     manifest["snapshot_id"] = "snapshot-team-v1"
-    manifest["handoff_contract_version"] = "0.1.0"
+    manifest["handoff_contract_version"] = "0.2.0"
     for entry in manifest["files"]:
         entry["evaluation_role"] = "training_only"
     manifest_bytes = (json.dumps(manifest, sort_keys=True) + "\n").encode()

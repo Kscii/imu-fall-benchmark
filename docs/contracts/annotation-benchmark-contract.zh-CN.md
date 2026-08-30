@@ -12,7 +12,7 @@
 
 | 模块 | 当前版本 | 作用 |
 | --- | --- | --- |
-| `dataset_handoff` | `0.1.0` | 标注平台向 benchmark 交接训练 HDF5 |
+| `dataset_handoff` | `0.2.0` | 标注平台向 benchmark 交接训练 HDF5 |
 | `experiment_catalog` | `1.0.0` | benchmark 向标注平台发布实验及逐模型 ONNX 证据 |
 | `model_release` | `1.0.0` | benchmark 向标注平台发布固定候选模型及其验证范围 |
 
@@ -36,7 +36,7 @@
 - `state.json` 是标注平台拥有的可变展示状态，只允许 `available` 与 `deprecated`，不属于 benchmark 交接证据，也不得改变不可变 metadata。
 - 页面只负责浏览、解释和下载，不在浏览器中执行 ONNX 推理，也不自动声明 `current`、`recommended` 或 `best`。
 
-## 3. `dataset_handoff` 0.1.0
+## 3. `dataset_handoff` 0.2.0
 
 ### 3.1 制品与对象布局
 
@@ -55,7 +55,7 @@ benchmark-datasets/team/cw12eu/current.json
 ```json
 {
   "schema_version": "imu_benchmark_dataset_manifest_v1",
-  "handoff_contract_version": "0.1.0",
+  "handoff_contract_version": "0.2.0",
   "kind": "team",
   "snapshot_id": "...",
   "files": [
@@ -77,7 +77,7 @@ benchmark-datasets/team/cw12eu/current.json
 
 ```json
 {
-  "handoff_contract_version": "0.1.0",
+  "handoff_contract_version": "0.2.0",
   "recordings": []
 }
 ```
@@ -93,7 +93,11 @@ benchmark-datasets/team/cw12eu/current.json
 - `/sequences`：包含 `sample_start`、`sample_stop`、`source_file`、`participant_id`、`recording_id`、`body_location`、`activity_code`、`is_fall`、`supervision_kind`、`source_sampling_rate_hz`。
 - `/annotations`：包含 `sequence_index`、`kind`、`start_sample`、`stop_sample`、`code`。
 - `activity` 与 `exclude` 使用半开区间 `[start_sample, stop_sample)`；`onset` 与 `impact` 是点事件，要求 `start_sample == stop_sample`。
-- temporal 跌倒序列中的 `onset` 与 `impact` 必须落在对应跌倒 activity 区间内；每个跌倒区间最多各有一个 onset 和 impact。
+- 一条 temporal 序列可以包含零个、一个或多个互不重叠的跌倒 activity 区间。
+- 每个最终确认的跌倒 activity 区间必须恰好有一个同 code 的 `onset` 和一个同 code 的 `impact`；`onset` 必须等于区间起点，`impact` 必须严格位于区间内部。
+- `is_fall` 当且仅当序列中至少存在一个有效跌倒区间。多个跌倒不拆成多个伪 recording；benchmark 必须以事件表逐个计数。
+
+现有无 `handoff_contract_version` 的团队 `current.json` 与 manifest 是迁移前历史对象。读取方可以只读兼容并发出警告；新 writer 只能写 `0.2.0`，不得原地补写或覆盖历史对象。本轮不因合同升级自动切换团队 `current.json`。
 
 原始 BLE 包、原始计数、视频、同步 review、标签管理和校准证据由标注平台保留，不属于此 handoff。benchmark 只能把交接的 SI HDF5 当作训练输入，不能从 HDF5 反推或改写原始证据。
 
@@ -196,7 +200,7 @@ benchmark-model-catalog/models/<release_id>/metadata.json
   "canonical_path": "docs/contracts/annotation-benchmark-contract.zh-CN.md",
   "sha256": "<64-hex>",
   "module_versions": {
-    "dataset_handoff": "0.1.0",
+    "dataset_handoff": "0.2.0",
     "experiment_catalog": "1.0.0",
     "model_release": "1.0.0"
   }

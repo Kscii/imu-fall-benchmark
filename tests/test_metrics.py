@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from imu_benchmark.metrics import (
     _alarm_positions,
@@ -28,10 +29,17 @@ def test_zero_window_fall_sequence_remains_an_event_miss() -> None:
         supervision_kind=np.asarray(["temporal", "temporal"]),
         sequence_is_fall=np.asarray([True, True]),
         sequence_fold_id=np.asarray([0, 0], dtype=np.int8),
+        event_sequence_index=np.asarray([0, 1], dtype=np.int32),
         event_onset_sample=np.asarray([0, 0], dtype=np.int64),
         event_impact_sample=np.asarray([25, 25], dtype=np.int64),
         event_stop_sample=np.asarray([50, 50], dtype=np.int64),
-        manifest={"sampling_rate_hz": 25, "stride_seconds": 0.5, "windows": 1},
+        event_code=np.asarray(["fall", "fall"]),
+        manifest={
+            "sampling_rate_hz": 25,
+            "stride_seconds": 0.5,
+            "windows": 1,
+            "fall_events": 2,
+        },
     )
     metrics = temporal_event_metrics(
         store,
@@ -112,10 +120,17 @@ def test_alarm_metrics_ignore_recording_only_fall_as_temporal_event() -> None:
         supervision_kind=np.asarray(["temporal", "recording"]),
         sequence_is_fall=np.asarray([False, True]),
         sequence_fold_id=np.asarray([0, 0], dtype=np.int8),
-        event_onset_sample=np.asarray([-1, -1], dtype=np.int64),
-        event_impact_sample=np.asarray([-1, -1], dtype=np.int64),
-        event_stop_sample=np.asarray([-1, -1], dtype=np.int64),
-        manifest={"sampling_rate_hz": 25, "stride_seconds": 0.5, "windows": 1},
+        event_sequence_index=np.empty(0, dtype=np.int32),
+        event_onset_sample=np.empty(0, dtype=np.int64),
+        event_impact_sample=np.empty(0, dtype=np.int64),
+        event_stop_sample=np.empty(0, dtype=np.int64),
+        event_code=np.empty(0, dtype=str),
+        manifest={
+            "sampling_rate_hz": 25,
+            "stride_seconds": 0.5,
+            "windows": 1,
+            "fall_events": 0,
+        },
     )
     result = alarm_policy_metrics(
         store,
@@ -133,3 +148,62 @@ def test_alarm_metrics_ignore_recording_only_fall_as_temporal_event() -> None:
     )
     assert result["fall_events"] == 0
     assert result["adl_recordings"] == 1
+
+
+def test_multi_event_alarm_metrics_count_each_event_and_event_external_false_alarm() -> None:
+    store = UnifiedWindowStore(
+        path=Path("unused.h5"),
+        sequence_index=np.zeros(3, dtype=np.int32),
+        start_sample=np.asarray([0, 50, 100], dtype=np.int32),
+        end_sample=np.asarray([50, 100, 150], dtype=np.int32),
+        fold_id=np.zeros(3, dtype=np.int8),
+        bag_label=np.ones(3, dtype=np.int8),
+        temporal_label=np.asarray([1, 0, 1], dtype=np.int8),
+        dataset_id=np.asarray(["continuous"]),
+        participant_id=np.asarray(["p1"]),
+        recording_id=np.asarray(["two_falls"]),
+        body_location=np.asarray(["chest"]),
+        supervision_kind=np.asarray(["temporal"]),
+        sequence_is_fall=np.asarray([True]),
+        sequence_fold_id=np.asarray([0], dtype=np.int8),
+        event_sequence_index=np.asarray([0, 0], dtype=np.int32),
+        event_onset_sample=np.asarray([25, 125], dtype=np.int64),
+        event_impact_sample=np.asarray([40, 140], dtype=np.int64),
+        event_stop_sample=np.asarray([75, 175], dtype=np.int64),
+        event_code=np.asarray(["fall-1", "fall-2"]),
+        manifest={
+            "sampling_rate_hz": 25,
+            "stride_seconds": 0.5,
+            "windows": 3,
+            "fall_events": 2,
+        },
+    )
+    policy = {
+        "id": "one_of_one",
+        "required_positive_windows": 1,
+        "lookback_windows": 1,
+        "consecutive": True,
+        "cooldown_seconds": 0.0,
+    }
+    result = alarm_policy_metrics(
+        store,
+        np.arange(3, dtype=np.int64),
+        np.asarray([0.9, 0.9, 0.9]),
+        0.5,
+        policy,
+    )
+
+    assert result["fall_events"] == 2
+    assert result["detected_events"] == 2
+    assert result["adl_alarm_episodes"] == 1
+    assert result["adl_negative_window_hours"] == pytest.approx(0.5 / 3600.0)
+
+    cooldown = alarm_policy_metrics(
+        store,
+        np.arange(3, dtype=np.int64),
+        np.asarray([0.9, 0.1, 0.9]),
+        0.5,
+        {**policy, "cooldown_seconds": 10.0},
+    )
+    assert cooldown["fall_events"] == 2
+    assert cooldown["detected_events"] == 1
