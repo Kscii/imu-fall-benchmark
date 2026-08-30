@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from .cloud_data import (
     _gcloud_cat,
     _object_uri,
     _read_json_bytes,
+    _run_gcloud,
     _sha256_file,
     data_bucket,
     ensure_gcloud_login,
@@ -29,13 +31,6 @@ from .progress import NullProgressReporter, ProgressReporter
 
 EXPERIMENT_CATALOG_PREFIX = "benchmark-model-catalog/experiments"
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
-
-
-def experiment_publication_id(run_id: str) -> str:
-    value = f"{run_id}-catalog-v1"
-    if not _IDENTIFIER.fullmatch(value):
-        raise ValueError("Derived experiment publication ID is invalid")
-    return value
 
 
 def _json_bytes(value: object) -> bytes:
@@ -54,8 +49,11 @@ def _metadata(
     run_dir: Path,
     run_manifest: dict[str, Any],
     result_manifest: dict[str, Any],
+    *,
+    publication_id: str,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Path]]:
-    publication_id = experiment_publication_id(str(run_manifest["run_id"]))
+    if not _IDENTIFIER.fullmatch(publication_id):
+        raise ValueError("Invalid experiment publication ID")
     prefix = f"{EXPERIMENT_CATALOG_PREFIX}/{publication_id}"
     catalog = build_experiment_catalog(run_dir, run_manifest)
     uploads: list[dict[str, Any]] = []
@@ -133,6 +131,7 @@ def publish_experiment_catalog(
     runs_root: Path,
     run_id: str,
     *,
+    publication_id: str,
     progress: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     reporter = progress or NullProgressReporter()
@@ -145,8 +144,12 @@ def publish_experiment_catalog(
     with reporter.task("Verifying the immutable benchmark result evidence"):
         result_manifest = _remote_manifest(bucket, run_id)
     with reporter.task("Building the independent experiment catalog"):
-        metadata, uploads, sources = _metadata(run_dir, run_manifest, result_manifest)
-    publication_id = metadata["publication_id"]
+        metadata, uploads, sources = _metadata(
+            run_dir,
+            run_manifest,
+            result_manifest,
+            publication_id=publication_id,
+        )
     with reporter.task("Uploading ONNX files and writing metadata last"):
         completed = publish_model_artifacts(
             publication_kind="experiment",
@@ -168,30 +171,61 @@ def publish_experiment_catalog(
     }
 
 
-def verify_experiment_catalog(publication_id: str) -> dict[str, Any]:
+def _download_descriptor(bucket: str, descriptor: dict[str, Any], destination: Path) -> None:
+    _run_gcloud(
+        "storage",
+        "cp",
+        _object_uri(bucket, str(descriptor["object_key"])),
+        str(destination),
+    )
+    if (
+        destination.stat().st_size != int(descriptor["size_bytes"])
+        or _sha256_file(destination) != descriptor["sha256"]
+    ):
+        raise ValueError(f"Remote artifact differs from metadata: {descriptor['filename']}")
+
+
+def verify_experiment_catalog(
+    publication_id: str,
+    *,
+    progress: ProgressReporter | None = None,
+) -> dict[str, Any]:
     if not _IDENTIFIER.fullmatch(publication_id):
         raise ValueError("Invalid experiment publication ID")
+    reporter = progress or NullProgressReporter()
     account = ensure_gcloud_login(interactive=False)
     bucket = data_bucket()
     key = f"{EXPERIMENT_CATALOG_PREFIX}/{publication_id}/metadata.json"
     payload = _gcloud_cat(_object_uri(bucket, key), optional=False)
     assert payload is not None
     metadata = _read_json_bytes(payload, source=key)
-    if (
-        metadata.get("schema_version") != EXPERIMENT_CATALOG_SCHEMA
-        or metadata.get("contract_version") != EXPERIMENT_CATALOG_CONTRACT_VERSION
-        or metadata.get("publication_id") != publication_id
-    ):
+    if metadata.get("publication_id") != publication_id:
         raise ValueError("Remote experiment catalog metadata is invalid")
-    artifacts = metadata.get("artifacts")
-    if not isinstance(artifacts, list) or not artifacts:
-        raise ValueError("Remote experiment catalog has no ONNX artifacts")
+    validate_experiment_marker_v1(metadata)
+    artifacts = metadata["artifacts"]
+    with tempfile.TemporaryDirectory(prefix="imu-experiment-verify-") as temporary:
+        root = Path(temporary)
+        with reporter.task(
+            "Downloading and hashing published ONNX artifacts",
+            total=len(artifacts),
+            unit="files",
+        ) as task:
+            for artifact in artifacts:
+                descriptor = artifact["onnx"]
+                task.update(detail=str(descriptor["filename"]))
+                _download_descriptor(
+                    bucket,
+                    descriptor,
+                    root / str(descriptor["filename"]),
+                )
+                task.update(advance=1)
     return {
         "status": "PASS",
         "account": account,
         "bucket": bucket,
         "publication_id": publication_id,
         "onnx_artifacts": len(artifacts),
+        "verified_onnx_artifacts": len(artifacts),
     }
 
 

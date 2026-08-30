@@ -38,6 +38,7 @@ from .progress import (
     close_progress_reporter,
     create_progress_reporter,
 )
+from .release_builder import build_model_releases, plan_model_releases
 from .runtime import (
     FORMAL_COMMANDS,
     WorkPaths,
@@ -209,9 +210,7 @@ def _parser() -> argparse.ArgumentParser:
     activate = data_commands.add_parser(
         "activate-base", help="Switch current.json to an already staged base snapshot"
     )
-    activate.add_argument(
-        "--manifest", type=Path, default=PROJECT_ROOT / BASE_MANIFEST_PATH
-    )
+    activate.add_argument("--manifest", type=Path, default=PROJECT_ROOT / BASE_MANIFEST_PATH)
     activate.add_argument("--expected-current", required=True)
     results = commands.add_parser(
         "results", help="Publish, pull, or verify immutable benchmark results"
@@ -232,13 +231,12 @@ def _parser() -> argparse.ArgumentParser:
     experiments = commands.add_parser(
         "experiments", help="Publish or verify the read-only ONNX experiment catalog"
     )
-    experiment_commands = experiments.add_subparsers(
-        dest="experiments_command", required=True
-    )
+    experiment_commands = experiments.add_subparsers(dest="experiments_command", required=True)
     experiment_publish = experiment_commands.add_parser(
         "publish", help="Index one immutable benchmark result and its ONNX artifacts"
     )
     experiment_publish.add_argument("run_id")
+    experiment_publish.add_argument("--publication-id", required=True)
     experiment_verify = experiment_commands.add_parser(
         "verify", help="Verify one published experiment catalog"
     )
@@ -252,6 +250,15 @@ def _parser() -> argparse.ArgumentParser:
         "models", help="Publish or verify immutable two-file ONNX model releases"
     )
     model_commands = models.add_subparsers(dest="models_command", required=True)
+    model_plan = model_commands.add_parser(
+        "plan", help="Validate a release build and list work without training"
+    )
+    model_plan.add_argument("config", type=Path)
+    model_build = model_commands.add_parser(
+        "build", help="Build validation-selected final-refit ONNX research candidates"
+    )
+    model_build.add_argument("config", type=Path)
+    model_build.add_argument("--resume", action="store_true")
     model_package = model_commands.add_parser(
         "package", help="Build a strict model.onnx + metadata.json release directory"
     )
@@ -281,9 +288,7 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument("config", nargs="?", type=Path, default=DEFAULT_SMOKE_CONFIG)
     commands.add_parser("validate-data", help="Verify HDF5 v3.1 data, hashes, and folds")
     commands.add_parser("test", help="Run the repository Ruff and pytest checks")
-    commands.add_parser(
-        "smoke", help="Run the default seven-model temporal FP32 smoke config"
-    )
+    commands.add_parser("smoke", help="Run the default seven-model temporal FP32 smoke config")
     plan = commands.add_parser("plan", help="Resolve a YAML experiment without training")
     plan.add_argument("config", type=Path)
     run = commands.add_parser("run", help="Run a versioned YAML experiment")
@@ -354,17 +359,40 @@ def _dispatch(args: argparse.Namespace, reporter: ProgressReporter) -> dict[str,
         raise AssertionError(f"Unhandled results command: {args.results_command}")
     if args.command == "experiments":
         if args.experiments_command == "publish":
-            return publish_experiment_catalog(paths.runs, args.run_id, progress=reporter)
+            return publish_experiment_catalog(
+                paths.runs,
+                args.run_id,
+                publication_id=args.publication_id,
+                progress=reporter,
+            )
         if args.experiments_command == "verify":
-            return verify_experiment_catalog(args.publication_id)
+            return verify_experiment_catalog(args.publication_id, progress=reporter)
         if args.experiments_command == "restore":
             return restore_experiment_catalog(
                 args.publication_id, expected_generation=args.expected_generation
             )
-        raise AssertionError(
-            f"Unhandled experiments command: {args.experiments_command}"
-        )
+        raise AssertionError(f"Unhandled experiments command: {args.experiments_command}")
     if args.command == "models":
+        if args.models_command == "plan":
+            return plan_model_releases(
+                project_root=PROJECT_ROOT,
+                paths=paths,
+                config_path=args.config.resolve(),
+                progress=reporter,
+            )
+        if args.models_command == "build":
+            require_compute_runtime("run", PROJECT_ROOT)
+            config = _config(DEFAULT_SMOKE_CONFIG, paths)
+            doctor = _doctor_result(config, paths, reporter)
+            return build_model_releases(
+                project_root=PROJECT_ROOT,
+                paths=paths,
+                config_path=args.config.resolve(),
+                source=doctor["source"],
+                environment=doctor["environment"],
+                resume=args.resume,
+                progress=reporter,
+            )
         if args.models_command == "package":
             return package_model_release(args.spec, args.output_dir)
         if args.models_command == "publish":
