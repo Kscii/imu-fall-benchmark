@@ -50,7 +50,7 @@ from .window_cache import (
 )
 
 ENGINE_SCHEMA_VERSION = 5
-JOB_CHECKPOINT_SCHEMA_VERSION = 3
+JOB_CHECKPOINT_SCHEMA_VERSION = 4
 TABULAR_MODELS = (
     "cuml_logistic_regression",
     "cuml_random_forest",
@@ -535,6 +535,10 @@ def _write_checkpoint(
     label: np.ndarray,
     fall_score: np.ndarray,
     external_fall_score: np.ndarray,
+    validation_window_index: np.ndarray,
+    validation_label: np.ndarray,
+    validation_fall_score: np.ndarray,
+    validation_participant_key: np.ndarray,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(f".npz.tmp-{os.getpid()}")
@@ -546,6 +550,10 @@ def _write_checkpoint(
             label=np.asarray(label, dtype=np.int8),
             fall_score=np.asarray(fall_score, dtype=np.float32),
             external_fall_score=np.asarray(external_fall_score, dtype=np.float32),
+            validation_window_index=np.asarray(validation_window_index, dtype=np.int64),
+            validation_label=np.asarray(validation_label, dtype=np.int8),
+            validation_fall_score=np.asarray(validation_fall_score, dtype=np.float32),
+            validation_participant_key=np.asarray(validation_participant_key, dtype=str),
         )
     temporary.replace(path)
 
@@ -571,6 +579,26 @@ def _load_checkpoint(path: Path) -> dict[str, Any]:
             "label": label,
             "fall_score": np.asarray(archive["fall_score"], dtype=np.float64),
             "external_fall_score": np.asarray(archive["external_fall_score"], dtype=np.float64),
+            "validation_window_index": (
+                np.asarray(archive["validation_window_index"], dtype=np.int64)
+                if "validation_window_index" in archive
+                else np.empty(0, dtype=np.int64)
+            ),
+            "validation_label": (
+                np.asarray(archive["validation_label"], dtype=np.int8)
+                if "validation_label" in archive
+                else np.empty(0, dtype=np.int8)
+            ),
+            "validation_fall_score": (
+                np.asarray(archive["validation_fall_score"], dtype=np.float64)
+                if "validation_fall_score" in archive
+                else np.empty(0, dtype=np.float64)
+            ),
+            "validation_participant_key": (
+                np.asarray(archive["validation_participant_key"], dtype=str)
+                if "validation_participant_key" in archive
+                else np.empty(0, dtype=str)
+            ),
         }
 
 
@@ -1062,6 +1090,14 @@ def _run_job(
             },
         }
         with invocation.track("checkpoint_write_seconds"):
+            validation_sequences = store.sequence_index[split.validation]
+            validation_participants = np.asarray(
+                [
+                    f"{store.dataset_id[sequence]}\0{store.participant_id[sequence]}"
+                    for sequence in validation_sequences
+                ],
+                dtype=str,
+            )
             _write_checkpoint(
                 checkpoint,
                 metadata,
@@ -1069,6 +1105,10 @@ def _run_job(
                 store.temporal_label[split.test],
                 test_scores,
                 external_scores,
+                split.validation,
+                store.temporal_label[split.validation],
+                validation_scores,
+                validation_participants,
             )
         return {
             "status": "computed",

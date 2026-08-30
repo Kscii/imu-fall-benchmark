@@ -227,25 +227,28 @@ imu-bench experiments publish <run-id>
 imu-bench experiments verify <run-id>
 ```
 
-The independent catalog is stored under
-`benchmark-model-catalog/experiments/<run-id>/`. It references the immutable result,
+The independent v1 catalog is stored under
+`benchmark-model-catalog/experiments/<run-id>-catalog-v1/`. It references the immutable result,
 publishes each ONNX file directly, and writes `metadata.json` last. The annotation
 platform exposes method aggregates, artifact metrics and decision rules, direct ONNX
 downloads, metadata, and the existing complete result bundle. There is no mutable
 `current`, `recommended`, or `best` pointer.
 
-After a training method has been selected without using test-fold performance to choose
-one fold, publish a separately validated final model release:
+After a training method, threshold, and trigger policy have been selected using embedded
+validation-only OOF evidence, package and publish a separately validated research
+candidate. CV test-fold metrics are audit evidence and must not drive this selection:
 
 ```bash
+imu-bench models package /path/to/model-package-spec.yaml /path/to/model-release
 imu-bench models publish /path/to/model-release
 imu-bench models verify <release-id>
 ```
 
 The release directory contains exactly `model.onnx` and `metadata.json`. Metadata binds
-the model digest, input/output contract, score threshold, one trigger policy, validation
-evidence, source experiment, data fingerprint, metrics, and limitations. Publication
-requires ONNX checker PASS and recorded Python ONNX Runtime parity PASS.
+the model digest, input/output contract, release-specific inference interval, score
+threshold, one trigger policy, embedded validation OOF participant proof, source
+experiment, data fingerprint, metrics, and limitations. Publication requires ONNX checker
+PASS and an actually executed Python ONNX Runtime parity/golden-fixture check.
 Android/external-runtime and device replay may remain explicitly
 `not_tested`; they must never be implied by Python parity. Model output is `fall_score`,
 not a probability unless a separate probability calibration has been validated.

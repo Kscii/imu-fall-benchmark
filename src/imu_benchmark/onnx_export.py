@@ -119,9 +119,7 @@ def _tabular_model(adapter: Any, model_id: str, width: int) -> Any:
     raise ValueError(f"Unsupported tabular ONNX model: {model_id}")
 
 
-def _export_torch(
-    adapter: Any, model_id: str, sample: np.ndarray, destination: Path
-) -> None:
+def _export_torch(adapter: Any, model_id: str, sample: np.ndarray, destination: Path) -> None:
     import torch
 
     if adapter.model is None:
@@ -196,9 +194,7 @@ def export_and_validate_onnx(
         _export_torch(adapter, model_id, export_values, temporary)
         input_name = "imu"
     else:
-        onnx.save_model(
-            _tabular_model(adapter, model_id, export_values.shape[1]), temporary
-        )
+        onnx.save_model(_tabular_model(adapter, model_id, export_values.shape[1]), temporary)
         input_name = "features"
     model = onnx.load(temporary)
     onnx.checker.check_model(model)
@@ -224,12 +220,8 @@ def export_and_validate_onnx(
     total_batches = 0
     for split_name, (split_values, split_scores) in split_inputs.items():
         if len(split_values) != len(split_scores):
-            raise ValueError(
-                f"ONNX parity input and native-score lengths differ for {split_name}"
-            )
-        limit = len(split_values) if max_samples is None else min(
-            len(split_values), max_samples
-        )
+            raise ValueError(f"ONNX parity input and native-score lengths differ for {split_name}")
+        limit = len(split_values) if max_samples is None else min(len(split_values), max_samples)
         if not limit:
             raise ValueError(f"ONNX parity split is empty: {split_name}")
         values = np.ascontiguousarray(split_values[:limit], dtype=np.float32)
@@ -241,17 +233,13 @@ def export_and_validate_onnx(
         for probe_size in probe_sizes:
             started = time.perf_counter()
             observed = np.asarray(
-                session.run(
-                    ["fall_score"], {input_name: values[:probe_size]}
-                )[0]
+                session.run(["fall_score"], {input_name: values[:probe_size]})[0]
             ).reshape(-1)
             inference_seconds += time.perf_counter() - started
             started = time.perf_counter()
             probe_error = np.abs(observed - expected[:probe_size])
             comparison_seconds += time.perf_counter() - started
-            if not np.allclose(
-                observed, expected[:probe_size], rtol=rtol, atol=atol
-            ):
+            if not np.allclose(observed, expected[:probe_size], rtol=rtol, atol=atol):
                 raise ValueError(
                     f"ONNX parity failed for {model_id}/{split_name} at batch "
                     f"{probe_size}: max_abs_error={float(np.max(probe_error)):.8g}, "
@@ -264,17 +252,13 @@ def export_and_validate_onnx(
             stop = min(start + batch_size, limit)
             current = values[start:stop]
             started = time.perf_counter()
-            observed = np.asarray(
-                session.run(["fall_score"], {input_name: current})[0]
-            ).reshape(-1)
+            observed = np.asarray(session.run(["fall_score"], {input_name: current})[0]).reshape(-1)
             inference_seconds += time.perf_counter() - started
             started = time.perf_counter()
             batch_error = np.abs(observed - expected[start:stop])
             errors[start:stop] = batch_error
             comparison_seconds += time.perf_counter() - started
-            if not np.allclose(
-                observed, expected[start:stop], rtol=rtol, atol=atol
-            ):
+            if not np.allclose(observed, expected[start:stop], rtol=rtol, atol=atol):
                 raise ValueError(
                     f"ONNX parity failed for {model_id}/{split_name} at samples "
                     f"{start}:{stop}: max_abs_error={float(np.max(batch_error)):.8g}, "
@@ -320,8 +304,137 @@ def export_and_validate_onnx(
             "conversion_seconds": conversion_seconds,
             "runtime_inference_seconds": inference_seconds,
             "comparison_seconds": comparison_seconds,
-            "total_seconds": (
-                conversion_seconds + inference_seconds + comparison_seconds
-            ),
+            "total_seconds": (conversion_seconds + inference_seconds + comparison_seconds),
         },
     }
+
+
+def export_final_sequence_onnx(
+    adapter: Any,
+    raw_windows: np.ndarray,
+    mean: np.ndarray,
+    scale: np.ndarray,
+    native_scores: np.ndarray,
+    destination: Path,
+    *,
+    batch_size: int = 256,
+    rtol: float = 1e-4,
+    atol: float = 0.01,
+) -> dict[str, Any]:
+    """Export a raw-SI sequence model with normalization embedded in the graph."""
+
+    import onnx
+    import onnxruntime
+    import torch
+
+    values = np.ascontiguousarray(raw_windows, dtype=np.float32)
+    expected = np.asarray(native_scores, dtype=np.float64)
+    channel_mean = np.asarray(mean, dtype=np.float32)
+    channel_scale = np.asarray(scale, dtype=np.float32)
+    if values.ndim != 3 or values.shape[1:] != (50, 6) or len(values) != len(expected):
+        raise ValueError("Final ONNX parity requires aligned raw (n, 50, 6) windows")
+    if not len(values) or channel_mean.shape != (6,) or channel_scale.shape != (6,):
+        raise ValueError("Final ONNX normalization contract is invalid")
+    if not np.isfinite(values).all() or not np.isfinite(expected).all():
+        raise ValueError("Final ONNX parity inputs must be finite")
+    if adapter.model is None:
+        raise RuntimeError("Cannot export an unfitted final PyTorch model")
+
+    class RawProbabilityModel(torch.nn.Module):
+        def __init__(self, model: Any) -> None:
+            super().__init__()
+            self.model = model
+            self.register_buffer("channel_mean", torch.as_tensor(channel_mean).reshape(1, 1, 6))
+            self.register_buffer("channel_scale", torch.as_tensor(channel_scale).reshape(1, 1, 6))
+
+        def forward(self, raw: Any) -> Any:
+            normalized = (raw - self.channel_mean) / self.channel_scale
+            return torch.sigmoid(self.model(normalized))
+
+    wrapper = RawProbabilityModel(copy.deepcopy(adapter.model).cpu()).eval()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.parent / f"{destination.stem}.tmp-{os.getpid()}.onnx"
+    example = torch.as_tensor(values[: min(256, len(values))], dtype=torch.float32)
+    use_dynamo = adapter.model_id == "torch_1d_cnn"
+    torch.onnx.export(
+        wrapper,
+        (example if use_dynamo else example[:1],),
+        temporary,
+        input_names=["imu"],
+        output_names=["fall_score"],
+        dynamic_axes={"imu": {0: "batch"}, "fall_score": {0: "batch"}},
+        opset_version=ONNX_OPSET,
+        dynamo=use_dynamo,
+    )
+    model = onnx.load(temporary)
+    onnx.checker.check_model(model)
+    session = onnxruntime.InferenceSession(str(temporary), providers=["CPUExecutionProvider"])
+    errors = np.empty(len(values), dtype=np.float64)
+    batches = 0
+    for start in range(0, len(values), batch_size):
+        stop = min(start + batch_size, len(values))
+        observed = np.asarray(session.run(["fall_score"], {"imu": values[start:stop]})[0]).reshape(
+            -1
+        )
+        errors[start:stop] = np.abs(observed - expected[start:stop])
+        if not np.allclose(observed, expected[start:stop], rtol=rtol, atol=atol):
+            raise ValueError(
+                "Final ONNX parity failed at samples "
+                f"{start}:{stop}: max_abs_error={float(np.max(errors[start:stop])):.8g}"
+            )
+        batches += 1
+    temporary.replace(destination)
+    fixtures = _synthetic_golden_fixtures(session, atol=max(atol, 1e-5))
+    return {
+        "status": "PASS",
+        "scope": "all_final_training_windows",
+        "samples": len(values),
+        "batches": batches,
+        "batch_size": batch_size,
+        "maximum_absolute_error": float(np.max(errors)),
+        "mean_absolute_error": float(np.mean(errors)),
+        "p99_absolute_error": float(np.quantile(errors, 0.99)),
+        "relative_tolerance": rtol,
+        "absolute_tolerance": atol,
+        "onnx": onnx.__version__,
+        "onnxruntime": onnxruntime.__version__,
+        "provider": "CPUExecutionProvider",
+        "sha256": _sha256(destination),
+        "size_bytes": destination.stat().st_size,
+        "golden_fixtures": fixtures,
+    }
+
+
+def _synthetic_golden_fixtures(session: Any, *, atol: float) -> list[dict[str, Any]]:
+    """Create privacy-safe deterministic fixtures and evaluate expected scores."""
+
+    time_axis = np.arange(50, dtype=np.float32) / 25.0
+    stationary = np.zeros((50, 6), dtype=np.float32)
+    stationary[:, 2] = 9.80665
+    adl = stationary.copy()
+    adl[:, 0] = 1.2 * np.sin(2.0 * np.pi * 0.75 * time_axis)
+    adl[:, 1] = 0.8 * np.cos(2.0 * np.pi * 0.5 * time_axis)
+    adl[:, 3] = 0.35 * np.sin(2.0 * np.pi * 0.75 * time_axis)
+    impact = stationary.copy()
+    impact[24:27, 0] = np.asarray([12.0, 28.0, 10.0], dtype=np.float32)
+    impact[24:27, 2] = np.asarray([5.0, 2.0, 7.0], dtype=np.float32)
+    impact[23:29, 4] = 5.0
+    result = []
+    for fixture_id, values in (
+        ("stationary", stationary),
+        ("adl-like", adl),
+        ("impact-like", impact),
+    ):
+        score = float(
+            np.asarray(session.run(["fall_score"], {"imu": values[None, ...]})[0]).reshape(-1)[0]
+        )
+        result.append(
+            {
+                "fixture_id": fixture_id,
+                "input_values": values.tolist(),
+                "expected_fall_score": score,
+                "rtol": 1e-5,
+                "atol": atol,
+            }
+        )
+    return result
