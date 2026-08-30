@@ -1,0 +1,28 @@
+schema_version: 1
+id: public_temporal_android_rc1
+source_run_id: formal_baseline_temporal_core_onnx_v1-bfef2ab3d903
+source_experiment_config: configs/experiments/formal_baseline_temporal_core_onnx_v1.yaml
+models:
+  - model_id: torch_1d_cnn
+    release_id: public-temporal-1d-cnn-natural-rc1
+    name: Public Temporal 1D CNN Natural RC1
+  - model_id: torch_lstm
+    release_id: public-temporal-lstm-natural-rc1
+    name: Public Temporal LSTM Natural RC1
+  - model_id: torch_cnn_lstm
+    release_id: public-temporal-cnn-lstm-natural-rc1
+    name: Public Temporal CNN-LSTM Natural RC1
+seed: 3888
+training_recipe: natural
+precision: fp32
+deployment_inference_interval_seconds: 1.0
+event_sensitivity_tolerance_percentage_points: 1.0
+onnx_parity_batch_size: 256
+onnx_parity_rtol: 0.0001
+onnx_parity_atol: 0.01
+known_limitations:
+  - This is a research candidate, not a product safety certification.
+  - Selection evidence uses validation OOF scores from simulated public lower-back falls.
+  - The final-refit model has no independent held-out accuracy estimate.
+  - Chest placement, real older-adult falls, the final device, Android runtime, and device replay are not validated.
+  - The threshold and alarm policy are provisional and must be recalculated when the dataset changes.

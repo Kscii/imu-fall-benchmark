@@ -261,6 +261,47 @@ class CudaSequenceTrainer:
             self.model.load_state_dict(best_state)
         synchronize()
 
+    def fit_supervised_fixed_epochs(
+        self,
+        train: np.ndarray,
+        train_labels: np.ndarray,
+        *,
+        epochs: int,
+    ) -> None:
+        """Fit the final-refit model for an already selected fixed epoch count."""
+
+        if epochs <= 0:
+            raise ValueError("Final-refit epochs must be positive")
+        _, _, torch, _ = require_cuda_modules()
+        train_values = self._host_or_device(train)
+        optimizer, loss_function = self._setup(train_labels)
+        generator = np.random.default_rng(self.random_seed)
+        batch_size = int(self.params["batch_size"])
+        for epoch in range(1, epochs + 1):
+            if self.model is None:
+                raise RuntimeError("Sequence model is missing")
+            self.model.train()
+            order = generator.permutation(len(train_labels))
+            losses: list[float] = []
+            for start in range(0, len(order), batch_size):
+                positions = order[start : start + batch_size]
+                values = self._batch(train_values, positions)
+                labels = torch.as_tensor(
+                    train_labels[positions], dtype=torch.float32, device="cuda"
+                )
+                optimizer.zero_grad(set_to_none=True)
+                with self._autocast():
+                    loss = loss_function(self.model(values).float(), labels)
+                loss.backward()
+                optimizer.step()
+                losses.append(float(loss.detach().cpu()))
+            mean_loss = float(np.mean(losses))
+            self.training_history.append({"epoch": epoch, "training_loss": mean_loss})
+            if self.epoch_callback is not None:
+                self.epoch_callback(epoch, epochs, mean_loss, 0)
+        self.best_epoch = epochs
+        synchronize()
+
     def _bag_logits(self, values: Any, sequence_index: np.ndarray) -> tuple[Any, np.ndarray]:
         _, _, torch, _ = require_cuda_modules()
         if self.model is None:

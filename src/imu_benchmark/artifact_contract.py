@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from datetime import datetime
 from typing import Any
 
 EXPERIMENT_SCHEMA_V1 = "imu_experiment_catalog_v1"
@@ -14,6 +15,7 @@ MODEL_CONTRACT_VERSION = "1.0.0"
 
 _SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _STATUS = {"PASS", "FAIL", "not_tested"}
 
 
@@ -46,7 +48,11 @@ def _object(value: object, name: str) -> dict[str, Any]:
 
 
 def _finite(value: object, name: str, *, positive: bool = False) -> float:
-    if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
         raise ValueError(f"{name} must be finite")
     result = float(value)
     if positive and result <= 0:
@@ -65,6 +71,18 @@ def _status(value: object, name: str) -> dict[str, Any]:
     if item.get("status") not in _STATUS:
         raise ValueError(f"{name}.status is invalid")
     return item
+
+
+def _utc(value: object, name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be UTC ISO 8601")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{name} must be UTC ISO 8601") from error
+    if parsed.utcoffset() is None or parsed.utcoffset().total_seconds() != 0:
+        raise ValueError(f"{name} must be UTC ISO 8601")
+    return value
 
 
 def validate_experiment_marker_v1(marker: dict[str, Any]) -> None:
@@ -97,6 +115,7 @@ def validate_experiment_marker_v1(marker: dict[str, Any]) -> None:
     evidence_level = marker.get("evidence_level")
     if evidence_level not in {"formal_cv", "engineering"}:
         raise ValueError("Experiment evidence level is invalid")
+    _utc(marker.get("created_at_utc"), "experiment created_at_utc")
     methods = marker.get("methods")
     artifacts = marker.get("artifacts")
     if not isinstance(methods, list) or not methods:
@@ -105,6 +124,10 @@ def validate_experiment_marker_v1(marker: dict[str, Any]) -> None:
         raise ValueError("Experiment catalog has no artifacts")
     artifact_ids: set[str] = set()
     folds_by_method: dict[str, set[int]] = {}
+    publication_id = marker.get("publication_id")
+    if not isinstance(publication_id, str) or not publication_id:
+        raise ValueError("Experiment publication identity is invalid")
+    prefix = f"benchmark-model-catalog/experiments/{publication_id}/onnx/"
     for artifact in artifacts:
         if not isinstance(artifact, dict):
             raise ValueError("Experiment artifact is invalid")
@@ -112,6 +135,7 @@ def validate_experiment_marker_v1(marker: dict[str, Any]) -> None:
         method_id = artifact.get("method_id")
         fold = artifact.get("fold")
         metrics = artifact.get("metrics")
+        descriptor = artifact.get("onnx")
         if (
             not isinstance(artifact_id, str)
             or not artifact_id
@@ -122,8 +146,15 @@ def validate_experiment_marker_v1(marker: dict[str, Any]) -> None:
             or not isinstance(metrics, dict)
             or metrics.get("metric_split") != "test"
             or metrics.get("selection_eligible") is not False
+            or not isinstance(descriptor, dict)
+            or descriptor.get("filename") != f"{artifact_id}.onnx"
+            or descriptor.get("object_key") != f"{prefix}{artifact_id}.onnx"
+            or descriptor.get("content_type") != "application/octet-stream"
+            or not isinstance(descriptor.get("size_bytes"), int)
+            or descriptor["size_bytes"] <= 0
         ):
             raise ValueError("Experiment artifact identity or metric scope is invalid")
+        _sha(descriptor.get("sha256"), "experiment ONNX SHA-256")
         artifact_ids.add(artifact_id)
         folds_by_method.setdefault(method_id, set()).add(fold)
     method_ids: set[str] = set()
@@ -155,6 +186,16 @@ def validate_experiment_marker_v1(marker: dict[str, Any]) -> None:
             raise ValueError("Formal cross-validation requires folds 0 through 4")
     if set(folds_by_method) != method_ids:
         raise ValueError("Experiment artifacts reference an unknown method")
+    evidence = _object(marker.get("result_evidence"), "result evidence")
+    for name in ("manifest", "bundle"):
+        descriptor = _object(evidence.get(name), f"result {name}")
+        _sha(descriptor.get("sha256"), f"result {name} SHA-256")
+        if (
+            not isinstance(descriptor.get("object_key"), str)
+            or not isinstance(descriptor.get("size_bytes"), int)
+            or descriptor["size_bytes"] <= 0
+        ):
+            raise ValueError(f"Result {name} descriptor is invalid")
 
 
 def validate_selection_evidence(value: object) -> dict[str, Any]:
@@ -181,6 +222,13 @@ def validate_selection_evidence(value: object) -> dict[str, Any]:
         or evidence.get("selection_eligible") is not True
     ):
         raise ValueError("Selection evidence scope is invalid")
+    if (
+        not isinstance(evidence.get("source_run_id"), str)
+        or _COMMIT.fullmatch(str(evidence.get("source_commit"))) is None
+        or not isinstance(evidence.get("model_id"), str)
+        or not isinstance(evidence.get("training_recipe"), str)
+    ):
+        raise ValueError("Selection evidence source identity is invalid")
     _sha(evidence.get("data_snapshot_fingerprint"), "data snapshot fingerprint")
     _sha(evidence.get("split_fingerprint"), "split fingerprint")
     proof = _object(evidence.get("participant_once"), "participant-once proof")
@@ -199,9 +247,7 @@ def validate_selection_evidence(value: object) -> dict[str, Any]:
     _sha(proof.get("assignment_sha256"), "participant assignment SHA-256")
     for name in ("threshold_selection", "trigger_policy_selection"):
         rule = _object(evidence.get(name), name.replace("_", " "))
-        if not isinstance(rule.get("method"), str) or not isinstance(
-            rule.get("tie_break"), str
-        ):
+        if not isinstance(rule.get("method"), str) or not isinstance(rule.get("tie_break"), str):
             raise ValueError(f"{name} is incomplete")
     descriptor = evidence.get("artifact")
     if descriptor is not None:
@@ -249,12 +295,13 @@ def validate_model_marker_v1(marker: dict[str, Any]) -> None:
     )
     if marker.get("release_stage") != "research_candidate":
         raise ValueError("Model release stage is invalid")
+    _utc(marker.get("created_at_utc"), "model release created_at_utc")
     source = _object(marker.get("source"), "model release source")
     selection = validate_selection_evidence(source.get("selection_evidence"))
     final = _object(source.get("final_training"), "final training evidence")
     if (
         final.get("dirty") is not False
-        or not isinstance(final.get("commit"), str)
+        or _COMMIT.fullmatch(str(final.get("commit"))) is None
         or not isinstance(final.get("seed"), int)
         or not isinstance(final.get("fixed_epoch_source"), str)
         or not isinstance(final.get("training_scope"), str)
@@ -283,20 +330,34 @@ def validate_model_marker_v1(marker: dict[str, Any]) -> None:
         raise ValueError("Model output contract is invalid")
     preprocessing = _object(marker.get("preprocessing"), "model preprocessing")
     normalization = _object(preprocessing.get("normalization"), "normalization")
-    if preprocessing.get("location") != "onnx_graph" or normalization.get("embedded") is not True:
+    mean = normalization.get("mean")
+    scale = normalization.get("scale")
+    if (
+        preprocessing.get("location") != "onnx_graph"
+        or normalization.get("embedded") is not True
+        or not isinstance(mean, list)
+        or len(mean) != 6
+        or not isinstance(scale, list)
+        or len(scale) != 6
+    ):
         raise ValueError("Model normalization is not embedded in ONNX")
+    for value in mean:
+        _finite(value, "normalization mean")
+    for value in scale:
+        _finite(value, "normalization scale", positive=True)
     windowing = _object(marker.get("windowing"), "model windowing")
-    interval = _finite(
-        windowing.get("inference_interval_seconds"),
-        "inference interval",
-        positive=True,
-    )
     if (
         _finite(windowing.get("window_seconds"), "window duration") != 2.0
+        or _finite(windowing.get("training_stride_seconds"), "training stride") != 0.5
+        or _finite(
+            windowing.get("inference_interval_seconds"),
+            "inference interval",
+            positive=True,
+        )
+        != 1.0
         or windowing.get("anchor") != "window_end"
-        or windowing.get("source_stride_seconds") != interval
-        or windowing.get("sequence_boundary") != "reset"
-        or windowing.get("timestamp_gap") != "reset"
+        or windowing.get("reset_on") != ["new_sequence", "stream_gap"]
+        or windowing.get("refill_frames_after_reset") != 50
     ):
         raise ValueError("Model windowing contract is invalid")
     decision = _object(marker.get("decision"), "model decision")
@@ -305,7 +366,7 @@ def validate_model_marker_v1(marker: dict[str, Any]) -> None:
     if (
         decision.get("status") != "provisional_validation_derived"
         or threshold.get("comparison") != ">="
-        or not isinstance(threshold.get("value"), (int, float))
+        or not 0.0 <= _finite(threshold.get("value"), "score threshold") <= 1.0
         or not {
             "policy_id",
             "required_positive_windows",
@@ -315,6 +376,19 @@ def validate_model_marker_v1(marker: dict[str, Any]) -> None:
         }.issubset(trigger)
     ):
         raise ValueError("Model decision contract is incomplete")
+    required_positive = trigger.get("required_positive_windows")
+    lookback = trigger.get("lookback_windows")
+    if (
+        isinstance(required_positive, bool)
+        or not isinstance(required_positive, int)
+        or required_positive <= 0
+        or isinstance(lookback, bool)
+        or not isinstance(lookback, int)
+        or lookback < required_positive
+        or not isinstance(trigger.get("consecutive"), bool)
+        or _finite(trigger.get("cooldown_seconds"), "cooldown seconds") < 0
+    ):
+        raise ValueError("Model trigger policy is invalid")
     metrics = _object(marker.get("metrics"), "model metrics")
     if (
         metrics.get("metric_split") != "validation_oof"
@@ -349,16 +423,22 @@ def validate_model_marker_v1(marker: dict[str, Any]) -> None:
             raise ValueError("Golden fixture input is invalid")
         fixture_ids.add(fixture_id)
         _finite(fixture.get("expected_fall_score"), "golden expected score")
-        _finite(fixture.get("atol"), "golden absolute tolerance")
-        _finite(fixture.get("rtol"), "golden relative tolerance")
+        if (
+            _finite(fixture.get("atol"), "golden absolute tolerance") < 0
+            or _finite(fixture.get("rtol"), "golden relative tolerance") < 0
+        ):
+            raise ValueError("Golden fixture tolerances must be non-negative")
+    if not {"stationary", "adl-like", "impact-like"}.issubset(fixture_ids):
+        raise ValueError("Model release golden fixture coverage is incomplete")
     validation = _object(marker.get("validation"), "model validation")
     if _status(validation.get("onnx_checker"), "ONNX checker").get("status") != "PASS":
         raise ValueError("ONNX checker must pass")
+    parity = _status(validation.get("python_onnxruntime_parity"), "Python ONNX parity")
     if (
-        _status(validation.get("python_onnxruntime_parity"), "Python ONNX parity").get(
-            "status"
-        )
-        != "PASS"
+        parity.get("status") != "PASS"
+        or parity.get("scope") != "all_final_training_windows"
+        or not isinstance(parity.get("windows"), int)
+        or parity["windows"] <= 0
     ):
         raise ValueError("Python ONNX Runtime parity must pass")
     _status(validation.get("external_runtime"), "external runtime")

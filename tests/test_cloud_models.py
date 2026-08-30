@@ -6,7 +6,12 @@ import pytest
 import yaml
 from onnx import TensorProto, helper
 
-from imu_benchmark.cloud_models import package_model_release, validate_model_release
+from imu_benchmark import cloud_models
+from imu_benchmark.cloud_models import (
+    package_model_release,
+    validate_model_release,
+    verify_model_release,
+)
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -101,15 +106,19 @@ def _release(tmp_path: Path) -> Path:
             },
             "preprocessing": {
                 "location": "onnx_graph",
-                "normalization": {"embedded": True},
+                "normalization": {
+                    "embedded": True,
+                    "mean": [0.0] * 6,
+                    "scale": [1.0] * 6,
+                },
             },
             "windowing": {
                 "window_seconds": 2.0,
-                "inference_interval_seconds": 0.5,
-                "source_stride_seconds": 0.5,
+                "training_stride_seconds": 0.5,
+                "inference_interval_seconds": 1.0,
                 "anchor": "window_end",
-                "sequence_boundary": "reset",
-                "timestamp_gap": "reset",
+                "reset_on": ["new_sequence", "stream_gap"],
+                "refill_frames_after_reset": 50,
             },
             "decision": {
                 "score_threshold": {"value": 0.5, "comparison": ">="},
@@ -130,7 +139,11 @@ def _release(tmp_path: Path) -> Path:
             },
             "validation": {
                 "onnx_checker": {"status": "PASS"},
-                "python_onnxruntime_parity": {"status": "PASS", "windows": 10},
+                "python_onnxruntime_parity": {
+                    "status": "PASS",
+                    "scope": "all_final_training_windows",
+                    "windows": 10,
+                },
                 "external_runtime": {"status": "not_tested"},
                 "device_replay": {"status": "not_tested"},
             },
@@ -167,3 +180,28 @@ def test_model_release_refuses_extra_files(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="exactly"):
         validate_model_release(root)
+
+
+def test_remote_model_verify_downloads_model_and_runs_golden_fixtures(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = _release(tmp_path)
+    metadata = json.loads((root / "metadata.json").read_text(encoding="utf-8"))
+
+    def run_gcloud(*arguments, **_kwargs):
+        assert arguments[:2] == ("storage", "cp")
+        Path(arguments[-1]).write_bytes((root / "model.onnx").read_bytes())
+
+    monkeypatch.setattr(cloud_models, "ensure_gcloud_login", lambda **_kwargs: "user@example.com")
+    monkeypatch.setattr(cloud_models, "data_bucket", lambda: "gs://fixture")
+    monkeypatch.setattr(
+        cloud_models,
+        "_gcloud_cat",
+        lambda *_args, **_kwargs: (json.dumps(metadata) + "\n").encode(),
+    )
+    monkeypatch.setattr(cloud_models, "_run_gcloud", run_gcloud)
+
+    result = verify_model_release(metadata["release_id"])
+
+    assert result["model_sha256"] == metadata["model"]["sha256"]
+    assert result["golden_fixtures_verified"] == 3

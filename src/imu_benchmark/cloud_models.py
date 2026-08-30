@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ from .cloud_data import (
     _gcloud_cat,
     _object_uri,
     _read_json_bytes,
+    _run_gcloud,
     _sha256_file,
     data_bucket,
     ensure_gcloud_login,
@@ -77,8 +79,8 @@ def _validate_metadata(root: Path) -> dict[str, Any]:
         "known_limitations",
         "model",
     }
-    if set(metadata) != required:
-        raise ValueError("Model release metadata fields differ from the contract")
+    if not required.issubset(metadata):
+        raise ValueError("Model release metadata is missing contract fields")
     if metadata.get("schema_version") != MODEL_RELEASE_SCHEMA:
         raise ValueError("Model release metadata schema is invalid")
     require_compatible_version(
@@ -182,8 +184,8 @@ def _package_fixtures(
     fixtures = []
     for fixture_id, values in (
         ("stationary", stationary),
-        ("adl_like", adl),
-        ("impact_like", impact),
+        ("adl-like", adl),
+        ("impact-like", impact),
     ):
         score = np.asarray(session.run([output_name], {input_name: values[None, :, :]})[0])
         if score.shape != (1,) or not np.isfinite(score[0]):
@@ -310,18 +312,30 @@ def verify_model_release(release_id: str) -> dict[str, Any]:
     payload = _gcloud_cat(_object_uri(bucket, key), optional=False)
     assert payload is not None
     metadata = _read_json_bytes(payload, source=key)
-    if (
-        metadata.get("schema_version") != MODEL_RELEASE_SCHEMA
-        or metadata.get("contract_version") != MODEL_RELEASE_CONTRACT_VERSION
-        or metadata.get("release_id") != release_id
-    ):
+    if metadata.get("release_id") != release_id:
         raise ValueError("Remote model release metadata is invalid")
+    validate_model_marker_v1(metadata)
+    descriptor = metadata["model"]
+    with tempfile.TemporaryDirectory(prefix="imu-model-verify-") as temporary:
+        root = Path(temporary)
+        (root / "metadata.json").write_text(
+            json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        _run_gcloud(
+            "storage",
+            "cp",
+            _object_uri(bucket, str(descriptor["object_key"])),
+            str(root / "model.onnx"),
+        )
+        validated = validate_model_release(root)
     return {
         "status": "PASS",
         "account": account,
         "bucket": bucket,
         "release_id": release_id,
-        "model_sha256": metadata.get("model", {}).get("sha256"),
+        "model_sha256": validated["model"]["sha256"],
+        "golden_fixtures_verified": len(validated["verification"]["golden_fixtures"]),
     }
 
 
