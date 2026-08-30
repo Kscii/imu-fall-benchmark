@@ -72,6 +72,21 @@ benchmark-datasets/team/cw12eu/current.json
 
 `current.json` 必须同时记录 `snapshot_id`、`manifest_object`、`manifest_sha256` 和 `handoff_contract_version`。流程应先创建并验证不可变快照，再切换 `current.json`；不得让 current 指向尚未通过 `imu-bench data pull --team-snapshot <snapshot_id>` 与 `validate-team` 的制品。
 
+`snapshot_id` 的内容 fingerprint 必须把 handoff 合同版本纳入身份。当前版本以已按
+`participant_id`、`recording_id` 排序的 `recordings` 清单构造以下对象：
+
+```json
+{
+  "handoff_contract_version": "0.1.0",
+  "recordings": []
+}
+```
+
+随后使用 UTF-8、JSON 排序键和紧凑分隔符（`,`、`:`）编码，计算 SHA-256，并以摘要前
+24 个十六进制字符组成 `snapshot-<digest>`。同一合同和同一录制内容必须得到同一 ID；即使
+录制内容不变，合同版本变化也必须得到新 ID。旧合同快照只能保留为历史证据，不得为补字段
+而原地覆盖不可变 manifest。
+
 ### 3.2 HDF5 3.1.0 约束
 
 - `/samples`：`float32 [N, 6]`，顺序为 `acceleration_x_mps2`、`acceleration_y_mps2`、`acceleration_z_mps2`、`angular_velocity_x_radps`、`angular_velocity_y_radps`、`angular_velocity_z_radps`，采样率 25 Hz，均为 SI 单位。
