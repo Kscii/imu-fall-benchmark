@@ -102,6 +102,14 @@ def test_fresh_setup_accepts_an_empty_environment_root(tmp_path: Path) -> None:
     )
 
 
+def test_wsl_runtime_installs_model_broker_http_client() -> None:
+    requirements = (PROJECT_ROOT / "requirements-runtime.txt").read_text(
+        encoding="utf-8"
+    )
+
+    assert "requests==2.34.2" in requirements.splitlines()
+
+
 def test_plain_progress_is_line_oriented() -> None:
     stream = StringIO()
     reporter = PlainProgressReporter(stream)

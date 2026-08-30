@@ -27,6 +27,7 @@ SUPPORTED_REMOTE_MANIFEST_SCHEMAS = {
     REMOTE_MANIFEST_SCHEMA,
 }
 CURRENT_SCHEMA = "imu_benchmark_current_v1"
+DATASET_HANDOFF_VERSION = "0.1.0"
 BASE_MANIFEST_PATH = Path("configs/data/base_imu25_v2.json")
 BASE_SPLITS_PATH = Path("configs/data/base_splits_v1.json")
 
@@ -129,10 +130,14 @@ def _validate_current(payload: dict[str, Any], *, kind: str) -> None:
         "manifest_sha256",
         "updated_at_utc",
     }
+    if kind == "team":
+        required.add("handoff_contract_version")
     if set(payload) != required or payload.get("schema_version") != CURRENT_SCHEMA:
         raise ValueError(f"Invalid {kind} current pointer")
     if payload.get("kind") != kind:
         raise ValueError(f"Current pointer kind differs: expected {kind}")
+    if kind == "team" and payload.get("handoff_contract_version") != DATASET_HANDOFF_VERSION:
+        raise ValueError("Team current pointer uses a different handoff contract")
     for name in ("snapshot_id", "manifest_object", "updated_at_utc"):
         if not isinstance(payload.get(name), str) or not payload[name]:
             raise ValueError(f"Current pointer has invalid {name}")
@@ -147,6 +152,11 @@ def _validate_remote_manifest(payload: dict[str, Any], *, expected_kind: str) ->
         raise ValueError("Unsupported remote dataset manifest")
     if payload.get("kind") != expected_kind:
         raise ValueError("Remote manifest kind differs from current pointer")
+    if (
+        expected_kind == "team"
+        and payload.get("handoff_contract_version") != DATASET_HANDOFF_VERSION
+    ):
+        raise ValueError("Team manifest uses a different handoff contract")
     if payload.get("contract_version") != CONTRACT_VERSION:
         raise ValueError("Remote manifest uses a different benchmark contract")
     if not isinstance(payload.get("snapshot_id"), str) or not payload["snapshot_id"]:
@@ -269,6 +279,8 @@ def _remote_snapshot(
             "manifest_sha256": _sha256_bytes(manifest_bytes),
             "updated_at_utc": manifest["created_at_utc"],
         }
+        if kind == "team":
+            resolved["handoff_contract_version"] = DATASET_HANDOFF_VERSION
         return resolved, manifest
     current_bytes = _gcloud_cat(_object_uri(bucket, current_object), optional=optional)
     if current_bytes is None:

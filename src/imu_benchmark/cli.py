@@ -10,7 +10,22 @@ from pathlib import Path
 from typing import Any
 
 from .cloud_data import BASE_MANIFEST_PATH, activate_base, data_status, publish_base, pull_data
-from .cloud_results import publish_result, pull_result, verify_result
+from .cloud_experiments import (
+    publish_experiment_catalog,
+    restore_experiment_catalog,
+    verify_experiment_catalog,
+)
+from .cloud_models import (
+    publish_model_release,
+    restore_model_release,
+    verify_model_release,
+)
+from .cloud_results import (
+    publish_result,
+    pull_result,
+    restore_published_result,
+    verify_result,
+)
 from .configuration import load_experiment
 from .dataset import validate_data
 from .device import CudaUnavailable
@@ -208,6 +223,47 @@ def _parser() -> argparse.ArgumentParser:
     ):
         result_command = result_commands.add_parser(action, help=help_text)
         result_command.add_argument("run_id")
+    result_restore = result_commands.add_parser(
+        "restore", help="Admin-only restore of a deprecated result publication"
+    )
+    result_restore.add_argument("run_id")
+    result_restore.add_argument("--expected-generation", type=int, required=True)
+    experiments = commands.add_parser(
+        "experiments", help="Publish or verify the read-only ONNX experiment catalog"
+    )
+    experiment_commands = experiments.add_subparsers(
+        dest="experiments_command", required=True
+    )
+    experiment_publish = experiment_commands.add_parser(
+        "publish", help="Index one immutable benchmark result and its ONNX artifacts"
+    )
+    experiment_publish.add_argument("run_id")
+    experiment_verify = experiment_commands.add_parser(
+        "verify", help="Verify one published experiment catalog"
+    )
+    experiment_verify.add_argument("publication_id")
+    experiment_restore = experiment_commands.add_parser(
+        "restore", help="Admin-only restore of a hidden experiment catalog"
+    )
+    experiment_restore.add_argument("publication_id")
+    experiment_restore.add_argument("--expected-generation", type=int, required=True)
+    models = commands.add_parser(
+        "models", help="Publish or verify immutable two-file ONNX model releases"
+    )
+    model_commands = models.add_subparsers(dest="models_command", required=True)
+    model_publish = model_commands.add_parser(
+        "publish", help="Validate and publish one model.onnx + metadata.json directory"
+    )
+    model_publish.add_argument("release_dir", type=Path)
+    model_verify = model_commands.add_parser(
+        "verify", help="Verify one published final model release"
+    )
+    model_verify.add_argument("release_id")
+    model_restore = model_commands.add_parser(
+        "restore", help="Admin-only restore of a hidden final model release"
+    )
+    model_restore.add_argument("release_id")
+    model_restore.add_argument("--expected-generation", type=int, required=True)
     split = commands.add_parser("split", help="Propose sticky participant folds")
     split_commands = split.add_subparsers(dest="split_command", required=True)
     propose = split_commands.add_parser(
@@ -285,7 +341,33 @@ def _dispatch(args: argparse.Namespace, reporter: ProgressReporter) -> dict[str,
             return pull_result(paths.runs, args.run_id, progress=reporter)
         if args.results_command == "verify":
             return verify_result(paths.runs, args.run_id, progress=reporter)
+        if args.results_command == "restore":
+            return restore_published_result(
+                args.run_id, expected_generation=args.expected_generation
+            )
         raise AssertionError(f"Unhandled results command: {args.results_command}")
+    if args.command == "experiments":
+        if args.experiments_command == "publish":
+            return publish_experiment_catalog(paths.runs, args.run_id, progress=reporter)
+        if args.experiments_command == "verify":
+            return verify_experiment_catalog(args.publication_id)
+        if args.experiments_command == "restore":
+            return restore_experiment_catalog(
+                args.publication_id, expected_generation=args.expected_generation
+            )
+        raise AssertionError(
+            f"Unhandled experiments command: {args.experiments_command}"
+        )
+    if args.command == "models":
+        if args.models_command == "publish":
+            return publish_model_release(args.release_dir, progress=reporter)
+        if args.models_command == "verify":
+            return verify_model_release(args.release_id)
+        if args.models_command == "restore":
+            return restore_model_release(
+                args.release_id, expected_generation=args.expected_generation
+            )
+        raise AssertionError(f"Unhandled models command: {args.models_command}")
     if args.command == "split":
         if args.split_command == "propose":
             output_dir = (
