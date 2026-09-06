@@ -14,7 +14,14 @@ import numpy as np
 from .contract import DEFAULT_CONTRACT_PATH, default_active_snapshot_path, load_contract_snapshot
 from .progress import NullProgressReporter, ProgressReporter
 
-EXPECTED_SCHEMA_VERSION = "3.1.0"
+EXPECTED_SCHEMA_VERSION = "3.2.0"
+TRAINING_DATASET_PROFILE = "training_dataset"
+CLIENT_DELIVERY_PROFILE = "client_delivery"
+SUPPORTED_ARTIFACT_PROFILES = frozenset(
+    {TRAINING_DATASET_PROFILE, CLIENT_DELIVERY_PROFILE}
+)
+CORE_ROOT_OBJECTS = frozenset({"samples", "sequences", "annotations"})
+CLIENT_ROOT_OBJECTS = CORE_ROOT_OBJECTS | frozenset({"media", "labels"})
 FEATURE_COLUMNS = (
     "acceleration_x_mps2",
     "acceleration_y_mps2",
@@ -246,12 +253,25 @@ def _check_annotation_rows(
             raise ValueError(f"{path.name}: temporal event labels are inconsistent")
 
 
-def _check_file(path: Path) -> dict[str, object]:
+def _check_file(
+    path: Path,
+    *,
+    allowed_profiles: Collection[str],
+) -> dict[str, object]:
     with h5py.File(path, "r") as handle:
-        if set(handle.keys()) != {"samples", "sequences", "annotations"}:
-            raise ValueError(f"{path.name}: v3 requires samples, sequences, and annotations")
+        profile = _text(handle.attrs.get("artifact_profile", ""))
+        if profile not in SUPPORTED_ARTIFACT_PROFILES or profile not in allowed_profiles:
+            raise ValueError(f"{path.name}: unsupported artifact_profile {profile!r}")
+        expected_root = (
+            CORE_ROOT_OBJECTS if profile == TRAINING_DATASET_PROFILE else CLIENT_ROOT_OBJECTS
+        )
+        if set(handle.keys()) != expected_root:
+            raise ValueError(
+                f"{path.name}: {profile} has an invalid root layout; "
+                f"expected {sorted(expected_root)}"
+            )
         dataset_id = _text(handle.attrs.get("dataset_id", ""))
-        if dataset_id != path.stem:
+        if profile == TRAINING_DATASET_PROFILE and dataset_id != path.stem:
             raise ValueError(f"{path.name}: dataset_id does not match the filename")
         for name, expected in (
             ("imu_schema_version", EXPECTED_SCHEMA_VERSION),
@@ -343,6 +363,7 @@ def _check_file(path: Path) -> dict[str, object]:
         participants = {_text(value) for value in sequence_rows["participant_id"]}
         return {
             "dataset_id": dataset_id,
+            "artifact_profile": profile,
             "sequences": len(sequence_rows),
             "rows": len(samples),
             "annotations": len(annotation_rows),
@@ -357,8 +378,19 @@ def _check_file(path: Path) -> dict[str, object]:
         }
 
 
-def validate_hdf5_file(path: Path) -> dict[str, object]:
-    result = _check_file(path)
+def validate_hdf5_file(
+    path: Path,
+    *,
+    allowed_profiles: Collection[str] = (TRAINING_DATASET_PROFILE,),
+) -> dict[str, object]:
+    """Validate the v3.2 core contract and require an explicitly allowed profile.
+
+    Benchmark catalogs use the default training-only policy. Tools which only need
+    to read the common core of a customer delivery must opt in explicitly with
+    ``allowed_profiles=(CLIENT_DELIVERY_PROFILE,)``; this does not validate media.
+    """
+
+    result = _check_file(path, allowed_profiles=allowed_profiles)
     participants = result.pop("participants")
     if not isinstance(participants, set):
         raise ValueError(f"Invalid participant summary: {path}")
@@ -429,7 +461,7 @@ def _validate_collection(
     ) as task:
         for path in files:
             task.update(detail=path.name)
-            result = _check_file(path)
+            result = _check_file(path, allowed_profiles=(TRAINING_DATASET_PROFILE,))
             dataset_id = str(result["dataset_id"])
             entry = entry_by_id[dataset_id]
             expected_path = (data_root / str(entry["path"])).resolve()
@@ -552,6 +584,7 @@ def iter_recordings(
 ) -> Iterator[IMURecording]:
     seen: set[tuple[str, str]] = set()
     for path in _data_files(data_root, expected_dataset_ids):
+        _check_file(path, allowed_profiles=(TRAINING_DATASET_PROFILE,))
         with h5py.File(path, "r") as handle:
             dataset_id = _text(handle.attrs["dataset_id"])
             sequences = np.asarray(handle["sequences"])

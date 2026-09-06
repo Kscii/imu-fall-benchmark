@@ -97,7 +97,7 @@ def _render_results(console: Console, action: str, result: dict[str, Any]) -> No
 
 
 def _render_validation(console: Console, result: dict[str, Any]) -> None:
-    _status(console, "HDF5 v3.1 data validation", result)
+    _status(console, "HDF5 v3.2 data validation", result)
     table = Table(box=box.SIMPLE, show_header=True)
     table.add_column("Collection")
     for name in ("Files", "Sequences", "Rows", "Events", "Participants"):

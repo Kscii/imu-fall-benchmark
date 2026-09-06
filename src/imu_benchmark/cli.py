@@ -286,7 +286,7 @@ def _parser() -> argparse.ArgumentParser:
     propose.add_argument("--output-dir", type=Path)
     doctor = commands.add_parser("doctor", help="Verify WSL2, CUDA, and public model backends")
     doctor.add_argument("config", nargs="?", type=Path, default=DEFAULT_SMOKE_CONFIG)
-    commands.add_parser("validate-data", help="Verify HDF5 v3.1 data, hashes, and folds")
+    commands.add_parser("validate-data", help="Verify HDF5 v3.2 data, hashes, and folds")
     commands.add_parser("test", help="Run the repository Ruff and pytest checks")
     commands.add_parser("smoke", help="Run the default seven-model temporal FP32 smoke config")
     plan = commands.add_parser("plan", help="Resolve a YAML experiment without training")

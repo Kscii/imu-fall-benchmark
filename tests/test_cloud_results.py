@@ -184,7 +184,7 @@ def _formal_run(tmp_path: Path) -> Path:
             "dirty": False,
             "snapshot_sha256": None,
         },
-        "base_snapshot_id": "imu_25hz_snapshot_v2",
+        "base_snapshot_id": "imu_25hz_snapshot_v3",
         "data_view_id": "temporal_core_v1",
         "snapshot_sha256": "b" * 64,
         "resolved_config_sha256": "c" * 64,
@@ -270,7 +270,7 @@ def test_existing_result_v1_manifest_remains_readable() -> None:
         "experiment_id": "formal_baseline_temporal_core_onnx_v1",
         "scheduled_jobs": 65,
         "source": {"commit": "a" * 40, "dirty": False},
-        "base_snapshot_id": "imu_25hz_snapshot_v2",
+        "base_snapshot_id": "imu_25hz_snapshot_v3",
         "snapshot_sha256": "b" * 64,
         "resolved_config_sha256": "c" * 64,
         "bundle": {

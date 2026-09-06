@@ -144,7 +144,7 @@ def test_release_metadata_embeds_selection_proof_and_final_refit_scope(
         },
         source_config={
             "contract": {"window": {"stride_seconds": 0.25}},
-            "snapshot": {"base_snapshot_id": "imu_25hz_snapshot_v2"},
+            "snapshot": {"base_snapshot_id": "imu_25hz_snapshot_v3"},
             "snapshot_sha256": snapshot,
             "data_view": {"id": "all_temporal_v1"},
             "alarm_policy": {

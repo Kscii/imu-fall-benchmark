@@ -116,8 +116,8 @@ def _validate_run(run_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         or not source.get("commit")
     ):
         raise ValueError("Published results require a clean, identified source commit")
-    if manifest.get("base_snapshot_id") != "imu_25hz_snapshot_v2":
-        raise ValueError("Published results must use imu_25hz_snapshot_v2")
+    if manifest.get("base_snapshot_id") != "imu_25hz_snapshot_v3":
+        raise ValueError("Published results must use imu_25hz_snapshot_v3")
     for key in ("snapshot_sha256", "resolved_config_sha256"):
         value = manifest.get(key)
         if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):

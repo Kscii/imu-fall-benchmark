@@ -11,7 +11,13 @@ import pytest
 from imu_benchmark.configuration import load_experiment
 from imu_benchmark.contract import load_contract_snapshot
 from imu_benchmark.data import FEATURE_NAMES, extract_window_features
-from imu_benchmark.dataset import FEATURE_COLUMNS, FEATURE_UNITS, Annotation, validate_hdf5_file
+from imu_benchmark.dataset import (
+    CLIENT_DELIVERY_PROFILE,
+    FEATURE_COLUMNS,
+    FEATURE_UNITS,
+    Annotation,
+    validate_hdf5_file,
+)
 from imu_benchmark.evaluation import false_positive_windows_per_hour
 from imu_benchmark.protocol import linear_resample_to_grid, segment_decision_time_labels
 from imu_benchmark.window_cache import _window_starts
@@ -26,7 +32,7 @@ def test_contract_and_active_manifest_are_single_protocol_source(
         PROJECT_ROOT, snapshot_path=active_manifest_path
     )
     assert contract["contract_version"] == "imu_benchmark_contract_v2"
-    assert active["snapshot_version"] == "imu_25hz_snapshot_v2"
+    assert active["snapshot_version"] == "imu_25hz_snapshot_v3"
     assert contract["canonical_signal"]["sampling_rate_hz"] == 25
     assert contract["window"]["samples"] == 50
     assert contract["window"]["stride_seconds"] == 0.5
@@ -93,7 +99,7 @@ def test_false_positive_window_hour_metric_uses_physical_stride() -> None:
     assert rate == pytest.approx(3600.0)
 
 
-def test_synthetic_hdf5_v31_fixture(tmp_path: Path) -> None:
+def test_synthetic_hdf5_v32_training_fixture(tmp_path: Path) -> None:
     path = tmp_path / "synthetic.h5"
     text = h5py.string_dtype(encoding="utf-8")
     sequence_dtype = np.dtype(
@@ -138,7 +144,8 @@ def test_synthetic_hdf5_v31_fixture(tmp_path: Path) -> None:
         handle.attrs.update(
             {
                 "dataset_id": "synthetic",
-                "imu_schema_version": "3.1.0",
+                "imu_schema_version": "3.2.0",
+                "artifact_profile": "training_dataset",
                 "sampling_rate_hz": 25.0,
                 "axis_frame": "sensor_local",
                 "hdf5_compatibility": "1.14",
@@ -160,3 +167,13 @@ def test_synthetic_hdf5_v31_fixture(tmp_path: Path) -> None:
     assert result["events"] == 1
     assert result["segments"] == 3
     assert result["evaluation_role"] == "cross_validation"
+    assert result["artifact_profile"] == "training_dataset"
+
+    with h5py.File(path, "r+") as handle:
+        handle.attrs["artifact_profile"] = CLIENT_DELIVERY_PROFILE
+        handle.create_group("media")
+        handle.create_group("labels")
+    with pytest.raises(ValueError, match="unsupported artifact_profile"):
+        validate_hdf5_file(path)
+    client = validate_hdf5_file(path, allowed_profiles=(CLIENT_DELIVERY_PROFILE,))
+    assert client["artifact_profile"] == CLIENT_DELIVERY_PROFILE

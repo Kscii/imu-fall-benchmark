@@ -1,0 +1,261 @@
+{
+  "contract_version": "imu_benchmark_contract_v2",
+  "created_at_utc": "2026-09-06T05:51:49Z",
+  "files": [
+    {
+      "annotations": 0,
+      "artifact_profile": "training_dataset",
+      "body_locations": {
+        "chest": 195
+      },
+      "content_type": "application/x-hdf5",
+      "dataset_id": "cgu_bes",
+      "evaluation_role": "cross_validation",
+      "events": 0,
+      "fall_sequences": 60,
+      "filename": "cgu_bes.h5",
+      "hdf5_schema_version": "3.2.0",
+      "logical_content_sha256": "410292ad242a47f1c6197c4c3287a47dd075fe9839381158d72cc80d8c2aa607",
+      "object_key": "benchmark-datasets/base/imu_25hz_snapshot_v3/datasets/cgu_bes.h5",
+      "participants": 15,
+      "rows": 80437,
+      "sampling_rate_hz": 25.0,
+      "segments": 0,
+      "sequences": 195,
+      "sha256": "baf4b831044a51a9c15119d3b0bf5d675dea66933851cb4a21f2456d7356d8c9",
+      "size_bytes": 1702637,
+      "supervision": {
+        "recording": 195
+      }
+    },
+    {
+      "annotations": 0,
+      "artifact_profile": "training_dataset",
+      "body_locations": {
+        "chest": 1655
+      },
+      "content_type": "application/x-hdf5",
+      "dataset_id": "ipqm_fall",
+      "evaluation_role": "cross_validation",
+      "events": 0,
+      "fall_sequences": 611,
+      "filename": "ipqm_fall.h5",
+      "hdf5_schema_version": "3.2.0",
+      "logical_content_sha256": "e2da2c600546075142e163992bd1e34301c8b61230d6865335dad9e8258979f0",
+      "object_key": "benchmark-datasets/base/imu_25hz_snapshot_v3/datasets/ipqm_fall.h5",
+      "participants": 15,
+      "rows": 1004269,
+      "sampling_rate_hz": 25.0,
+      "segments": 0,
+      "sequences": 1655,
+      "sha256": "3f38212f34b08d71bc4e3f65e2266ea7aeb8c293374650bf041ff50c0517eaa4",
+      "size_bytes": 21304779,
+      "supervision": {
+        "recording": 1655
+      }
+    },
+    {
+      "annotations": 14459,
+      "artifact_profile": "training_dataset",
+      "body_locations": {
+        "lower_back": 5075
+      },
+      "content_type": "application/x-hdf5",
+      "dataset_id": "kfall",
+      "evaluation_role": "cross_validation",
+      "events": 2346,
+      "fall_sequences": 2346,
+      "filename": "kfall.h5",
+      "hdf5_schema_version": "3.2.0",
+      "logical_content_sha256": "82afc3b2bf82eae245b33bb68809484e3683c14b75aabce719e14c8fe610f28b",
+      "object_key": "benchmark-datasets/base/imu_25hz_snapshot_v3/datasets/kfall.h5",
+      "participants": 32,
+      "rows": 1000668,
+      "sampling_rate_hz": 25.0,
+      "segments": 9767,
+      "sequences": 5075,
+      "sha256": "1bb7dcf573d1e00e42d3e44a3730af52a68b4e0b4049d8163fe748692fe2fe6b",
+      "size_bytes": 23944005,
+      "supervision": {
+        "temporal": 5075
+      }
+    },
+    {
+      "annotations": 0,
+      "artifact_profile": "training_dataset",
+      "body_locations": {
+        "chest": 600,
+        "waist": 600
+      },
+      "content_type": "application/x-hdf5",
+      "dataset_id": "sfu_ipml",
+      "evaluation_role": "cross_validation",
+      "events": 0,
+      "fall_sequences": 420,
+      "filename": "sfu_ipml.h5",
+      "hdf5_schema_version": "3.2.0",
+      "logical_content_sha256": "3d04057053fad7f384db3820d0a0282df27e3307669421d53b73ffa65e85a713",
+      "object_key": "benchmark-datasets/base/imu_25hz_snapshot_v3/datasets/sfu_ipml.h5",
+      "participants": 10,
+      "rows": 465950,
+      "sampling_rate_hz": 25.0,
+      "segments": 0,
+      "sequences": 1200,
+      "sha256": "46bb316eeb86bedab0a106911d40477d016aaa2d6a7376ff6b5c9c9f95fc3227",
+      "size_bytes": 9701051,
+      "supervision": {
+        "recording": 1200
+      }
+    },
+    {
+      "annotations": 0,
+      "artifact_profile": "training_dataset",
+      "body_locations": {
+        "waist": 4505
+      },
+      "content_type": "application/x-hdf5",
+      "dataset_id": "sisfall",
+      "evaluation_role": "cross_validation",
+      "events": 0,
+      "fall_sequences": 1798,
+      "filename": "sisfall.h5",
+      "hdf5_schema_version": "3.2.0",
+      "logical_content_sha256": "f6af5dc5144c68ed70df0c9d505765d223f46a79b8a7bd0100cde13db1c8b103",
+      "object_key": "benchmark-datasets/base/imu_25hz_snapshot_v3/datasets/sisfall.h5",
+      "participants": 38,
+      "rows": 1982452,
+      "sampling_rate_hz": 25.0,
+      "segments": 0,
+      "sequences": 4505,
+      "sha256": "110415d711be9c996c594623160dbfe840e843349108c63715fd1d9b802e8433",
+      "size_bytes": 41643499,
+      "supervision": {
+        "recording": 4505
+      }
+    },
+    {
+      "annotations": 0,
+      "artifact_profile": "training_dataset",
+      "body_locations": {
+        "chest": 2945,
+        "waist": 2760
+      },
+      "content_type": "application/x-hdf5",
+      "dataset_id": "uci_455",
+      "evaluation_role": "cross_validation",
+      "events": 0,
+      "fall_sequences": 3134,
+      "filename": "uci_455.h5",
+      "hdf5_schema_version": "3.2.0",
+      "logical_content_sha256": "d3fdd913e51b091a19c0e68d84feeac703c720980c6881e218a851b2886c809f",
+      "object_key": "benchmark-datasets/base/imu_25hz_snapshot_v3/datasets/uci_455.h5",
+      "participants": 17,
+      "rows": 2723408,
+      "sampling_rate_hz": 25.0,
+      "segments": 0,
+      "sequences": 5705,
+      "sha256": "50c1bdf7776bdbd37952476033b2ad0d6adeb4c0752ff46bf9fded2c67e1798d",
+      "size_bytes": 48031934,
+      "supervision": {
+        "recording": 5705
+      }
+    },
+    {
+      "annotations": 0,
+      "artifact_profile": "training_dataset",
+      "body_locations": {
+        "chest": 745,
+        "waist": 617
+      },
+      "content_type": "application/x-hdf5",
+      "dataset_id": "umafall",
+      "evaluation_role": "cross_validation",
+      "events": 0,
+      "fall_sequences": 397,
+      "filename": "umafall.h5",
+      "hdf5_schema_version": "3.2.0",
+      "logical_content_sha256": "c14f6375cf29ccbe1dce1dea137d2dc12e463b9f359f5137a88e426e55762215",
+      "object_key": "benchmark-datasets/base/imu_25hz_snapshot_v3/datasets/umafall.h5",
+      "participants": 19,
+      "rows": 507167,
+      "sampling_rate_hz": 25.0,
+      "segments": 0,
+      "sequences": 1362,
+      "sha256": "d6432f14cb6d24cbf57c17f23c1151a59662f31673738554f374237b35faef78",
+      "size_bytes": 11066533,
+      "supervision": {
+        "recording": 1362
+      }
+    },
+    {
+      "annotations": 3516,
+      "artifact_profile": "training_dataset",
+      "body_locations": {
+        "lower_back": 1224
+      },
+      "content_type": "application/x-hdf5",
+      "dataset_id": "univrfall",
+      "evaluation_role": "cross_validation",
+      "events": 573,
+      "fall_sequences": 573,
+      "filename": "univrfall.h5",
+      "hdf5_schema_version": "3.2.0",
+      "logical_content_sha256": "267e515228983e27446a297e67f53bd4330c456e60fc9a18ad1439c186541ef8",
+      "object_key": "benchmark-datasets/base/imu_25hz_snapshot_v3/datasets/univrfall.h5",
+      "participants": 29,
+      "rows": 306030,
+      "sampling_rate_hz": 25.0,
+      "segments": 2370,
+      "sequences": 1224,
+      "sha256": "ec70cb5ecba4d8eba00d91b440af974250eaccffd0d947d178049f2650ce50da",
+      "size_bytes": 7012179,
+      "supervision": {
+        "temporal": 1224
+      }
+    },
+    {
+      "annotations": 1165,
+      "artifact_profile": "training_dataset",
+      "body_locations": {
+        "waist": 551
+      },
+      "content_type": "application/x-hdf5",
+      "dataset_id": "upfall",
+      "evaluation_role": "cross_validation",
+      "events": 0,
+      "fall_sequences": 255,
+      "filename": "upfall.h5",
+      "hdf5_schema_version": "3.2.0",
+      "logical_content_sha256": "4de76c0372b640fd842b39247d616e8bcd4d74de961fe0dfe7d94963b4510a0f",
+      "object_key": "benchmark-datasets/base/imu_25hz_snapshot_v3/datasets/upfall.h5",
+      "participants": 17,
+      "rows": 404915,
+      "sampling_rate_hz": 25.0,
+      "segments": 1165,
+      "sequences": 551,
+      "sha256": "d91b825f81c5131cd1b750de40931c9b9c8f21705431fcfe8d15892aebc5c001",
+      "size_bytes": 8200954,
+      "supervision": {
+        "recording": 551
+      }
+    }
+  ],
+  "kind": "base",
+  "schema_version": "imu_benchmark_dataset_manifest_v2",
+  "snapshot_id": "imu_25hz_snapshot_v3",
+  "source": {
+    "branch": "data/imu-25hz-v3.2",
+    "data_commit": "20d2d0d100269a4033b64b5349f2857a03480da4",
+    "repository": "SOFT3888_TU16_04"
+  },
+  "split_set_id": "public_participant_5fold_sticky_v1",
+  "splits": [
+    {
+      "filename": "participant_5fold_v4.csv",
+      "object_key": "benchmark-datasets/base/imu_25hz_snapshot_v3/splits/participant_5fold_v4.csv",
+      "sha256": "b66203649b3d04105bb9a10eb1e8ddcb33b829df40a39292f24a356cef2eaf08",
+      "size_bytes": 8837,
+      "version": "participant_5fold_v4"
+    }
+  ]
+}

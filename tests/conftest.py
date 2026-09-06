@@ -12,9 +12,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 @pytest.fixture
 def active_manifest_path(tmp_path: Path) -> Path:
     remote = json.loads(
-        (PROJECT_ROOT / "configs/data/base_imu25_v2.json").read_text(encoding="utf-8")
+        (PROJECT_ROOT / "configs/data/base_imu25_v3.json").read_text(encoding="utf-8")
     )
-    split_root = tmp_path / "base/imu_25hz_snapshot_v2/splits"
+    split_root = tmp_path / "base/imu_25hz_snapshot_v3/splits"
     split_root.mkdir(parents=True)
     splits = []
     for item in remote["splits"]:
@@ -23,7 +23,7 @@ def active_manifest_path(tmp_path: Path) -> Path:
         shutil.copy2(source, destination)
         splits.append(
             {
-                "path": f"base/imu_25hz_snapshot_v2/splits/{item['filename']}",
+                "path": f"base/imu_25hz_snapshot_v3/splits/{item['filename']}",
                 "version": item["version"],
                 "sha256": item["sha256"],
                 "size_bytes": item["size_bytes"],
@@ -40,14 +40,14 @@ def active_manifest_path(tmp_path: Path) -> Path:
     ]
     active = {
         "schema_version": "imu_benchmark_active_v2",
-        "snapshot_version": "imu_25hz_snapshot_v2",
+        "snapshot_version": "imu_25hz_snapshot_v3",
         "contract_version": "imu_benchmark_contract_v2",
         "bucket": "gs://unit-test",
         "base_snapshot_id": remote["snapshot_id"],
         "team_snapshot_id": None,
         "collections": {
             "base": {
-                "data_path": "base/imu_25hz_snapshot_v2/datasets",
+                "data_path": "base/imu_25hz_snapshot_v3/datasets",
                 "splits": splits,
                 "datasets": entries,
             }
