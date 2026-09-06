@@ -46,7 +46,9 @@ def main() -> None:
                 "object_key": f"{prefix}/datasets/{path.name}",
                 "size_bytes": path.stat().st_size,
                 "sha256": _sha256(path),
-                "hdf5_schema_version": "3.1.0",
+                "content_type": "application/x-hdf5",
+                "hdf5_schema_version": "3.2.0",
+                "artifact_profile": "training_dataset",
                 "sampling_rate_hz": 25.0,
                 **{
                     key: summary[key]

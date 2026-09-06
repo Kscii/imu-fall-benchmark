@@ -1,6 +1,6 @@
 # 标注平台与 Benchmark 数据契约
 
-状态：`dataset_handoff pre-v1`；`experiment_catalog` 与 `model_release` 已冻结 v1
+状态：三个模块均已冻结 v1
 规范源：`Kscii/imu-fall-benchmark`  
 读者：数据采集/标注平台与 benchmark 的开发者
 
@@ -12,7 +12,7 @@
 
 | 模块 | 当前版本 | 作用 |
 | --- | --- | --- |
-| `dataset_handoff` | `0.3.0` | 标注平台向 benchmark 交接训练 HDF5 |
+| `dataset_handoff` | `1.0.0` | 标注平台向 benchmark 交接训练 HDF5 |
 | `experiment_catalog` | `1.0.0` | benchmark 向标注平台发布实验及逐模型 ONNX 证据 |
 | `model_release` | `1.0.0` | benchmark 向标注平台发布固定候选模型及其验证范围 |
 
@@ -25,7 +25,8 @@
 - major：破坏性修改，必须明确批准，并让旧 major 的已发布制品继续可读；
 - 已发布对象不可原地修改；更正必须使用新 ID 和新对象键。
 
-第一批正式团队数据冻结 `dataset_handoff`；第一份正式实验目录和第一份正式模型分别冻结另外两个模块。它们不要求同时进入 v1。
+`dataset_handoff` 与物理 HDF5 3.2.0 在第一批正式团队数据发布时冻结；其物理结构以
+[`imu-hdf5-v3.2.md`](imu-hdf5-v3.2.md) 为唯一规范。实验目录和模型发布独立演进。
 
 ## 2. 通用规则
 
@@ -36,7 +37,7 @@
 - `state.json` 是标注平台拥有的可变展示状态，只允许 `available` 与 `deprecated`，不属于 benchmark 交接证据，也不得改变不可变 metadata。
 - 页面只负责浏览、解释和下载，不在浏览器中执行 ONNX 推理，也不自动声明 `current`、`recommended` 或 `best`。
 
-## 3. `dataset_handoff` 0.3.0
+## 3. `dataset_handoff` 1.0.0
 
 ### 3.1 制品与对象布局
 
@@ -48,14 +49,15 @@ benchmark-datasets/team/cw12eu/<snapshot_id>/manifest.json
 benchmark-datasets/team/cw12eu/current.json
 ```
 
-`cw12eu.h5` 使用内部物理格式 `imu_schema_version = 3.1.0`。物理 HDF5 schema 与仓库间 handoff 版本是两件事；升级其中之一不自动升级另一个。
+`cw12eu.h5` 使用 `imu_schema_version = 3.2.0`、`artifact_profile = training_dataset`。
+物理 HDF5 schema 与仓库间 handoff 版本是两件事；升级其中之一不自动升级另一个。
 
 `manifest.json` 至少包含：
 
 ```json
 {
-  "schema_version": "imu_benchmark_dataset_manifest_v1",
-  "handoff_contract_version": "0.3.0",
+  "schema_version": "imu_benchmark_dataset_manifest_v2",
+  "handoff_contract_version": "1.0.0",
   "kind": "team",
   "snapshot_id": "...",
   "files": [
@@ -64,7 +66,9 @@ benchmark-datasets/team/cw12eu/current.json
       "object_key": "benchmark-datasets/team/cw12eu/.../datasets/cw12eu.h5",
       "size_bytes": 1,
       "sha256": "...",
-      "content_type": "application/x-hdf5"
+      "content_type": "application/x-hdf5",
+      "hdf5_schema_version": "3.2.0",
+      "artifact_profile": "training_dataset"
     }
   ]
 }
@@ -77,7 +81,7 @@ benchmark-datasets/team/cw12eu/current.json
 
 ```json
 {
-  "handoff_contract_version": "0.3.0",
+  "handoff_contract_version": "1.0.0",
   "recordings": []
 }
 ```
@@ -87,7 +91,7 @@ benchmark-datasets/team/cw12eu/current.json
 录制内容不变，合同版本变化也必须得到新 ID。旧合同快照只能保留为历史证据，不得为补字段
 而原地覆盖不可变 manifest。
 
-### 3.2 HDF5 3.1.0 约束
+### 3.2 HDF5 3.2.0 约束
 
 - `/samples`：`float32 [N, 6]`，顺序为 `acceleration_x_mps2`、`acceleration_y_mps2`、`acceleration_z_mps2`、`angular_velocity_x_radps`、`angular_velocity_y_radps`、`angular_velocity_z_radps`，采样率 25 Hz，均为 SI 单位。
 - `/sequences`：包含 `sample_start`、`sample_stop`、`source_file`、`participant_id`、`recording_id`、`body_location`、`activity_code`、`is_fall`、`supervision_kind`、`source_sampling_rate_hz`。
@@ -99,9 +103,10 @@ benchmark-datasets/team/cw12eu/current.json
 - 每个最终确认的跌倒 activity 区间必须恰好有一个同 code 的 `onset` 和一个同 code 的 `impact`；`onset` 必须等于区间起点，`impact` 必须严格位于区间内部。
 - `is_fall` 当且仅当序列中至少存在一个有效跌倒区间。多个跌倒不拆成多个伪 recording；benchmark 必须以事件表逐个计数。
 
-现有无 `handoff_contract_version` 或使用 `0.1.0`/`0.2.0` 的团队对象是迁移前历史证据。读取方可以只读兼容并发出警告；新 writer 只能写 `0.3.0`，不得原地补写或覆盖历史对象。身份迁移期间必须暂停团队 `current.json`，只有全部参与者重新确认并生成新的匿名快照后才能重新激活。
+3.1 和 handoff 0.x 对象只作为不可变历史证据保留，不属于当前运行时输入。读取方不得
+静默迁移、补写或激活这些对象；新 writer 和 reader 只接受 3.2.0 / 1.0.0。
 
-原始 BLE 包、原始计数、视频、同步 review、标签管理和校准证据由标注平台保留，不属于此 handoff。benchmark 只能把交接的 SI HDF5 当作训练输入，不能从 HDF5 反推或改写原始证据。
+原始 BLE 包、原始计数、视频、同步 review、标签管理和校准证据由标注平台保留，不属于此 handoff。benchmark 只能把 `training_dataset` SI HDF5 当作训练输入，不能从 HDF5 反推或改写原始证据。客户单 H5 使用独立的 `client_delivery` profile，不得加入 benchmark 数据目录。
 
 ## 4. `experiment_catalog` 1.0.0
 
@@ -202,7 +207,7 @@ benchmark-model-catalog/models/<release_id>/metadata.json
   "canonical_path": "docs/contracts/annotation-benchmark-contract.zh-CN.md",
   "sha256": "<64-hex>",
   "module_versions": {
-    "dataset_handoff": "0.3.0",
+    "dataset_handoff": "1.0.0",
     "experiment_catalog": "1.0.0",
     "model_release": "1.0.0"
   }

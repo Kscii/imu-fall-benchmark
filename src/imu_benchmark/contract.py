@@ -8,16 +8,10 @@ from pathlib import Path
 from typing import Any
 
 CONTRACT_VERSION = "imu_benchmark_contract_v2"
-SNAPSHOT_VERSION = "imu_25hz_snapshot_v2"
+SNAPSHOT_VERSION = "imu_25hz_snapshot_v3"
 ACTIVE_SCHEMA_VERSION = "imu_benchmark_active_v2"
-SUPPORTED_ACTIVE_SCHEMA_VERSIONS = {
-    "imu_benchmark_active_v1",
-    ACTIVE_SCHEMA_VERSION,
-}
-SUPPORTED_SNAPSHOT_VERSIONS = {
-    "imu_25hz_snapshot_v1",
-    SNAPSHOT_VERSION,
-}
+SUPPORTED_ACTIVE_SCHEMA_VERSIONS = {ACTIVE_SCHEMA_VERSION}
+SUPPORTED_SNAPSHOT_VERSIONS = {SNAPSHOT_VERSION}
 DEFAULT_CONTRACT_PATH = Path("configs/contracts/imu_benchmark_contract_v2.json")
 DEFAULT_SNAPSHOT_PATH = Path("active.json")
 
@@ -126,8 +120,8 @@ def load_contract_snapshot(
 def validate_contract(contract: dict[str, Any]) -> None:
     if contract.get("contract_version") != CONTRACT_VERSION:
         raise ValueError("Unexpected benchmark contract version")
-    if contract.get("data_schema_version") != "3.1.0":
-        raise ValueError("The contract requires HDF5 schema 3.1.0")
+    if contract.get("data_schema_version") != "3.2.0":
+        raise ValueError("The contract requires HDF5 schema 3.2.0")
     signal = contract.get("canonical_signal", {})
     if signal != {
         "sampling_rate_hz": 25,
@@ -211,6 +205,7 @@ def _validate_dataset_entries(
         "logical_content_sha256",
         "size_bytes",
         "hdf5_schema_version",
+        "artifact_profile",
         "sampling_rate_hz",
         "evaluation_role",
         "sequences",
@@ -234,8 +229,10 @@ def _validate_dataset_entries(
             raise ValueError(f"Invalid dataset identity in {collection_name}")
         ids.add(dataset_id)
         paths.add(relative)
-        if entry["hdf5_schema_version"] != "3.1.0":
+        if entry["hdf5_schema_version"] != "3.2.0":
             raise ValueError(f"Invalid HDF5 schema in {collection_name}")
+        if entry["artifact_profile"] != "training_dataset":
+            raise ValueError(f"Invalid artifact profile in {collection_name}")
         if float(entry["sampling_rate_hz"]) != 25.0:
             raise ValueError(f"Invalid sampling rate in {collection_name}")
         if entry["evaluation_role"] != expected_role:

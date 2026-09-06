@@ -45,10 +45,10 @@ imu-bench smoke
 
 Running `./setup` from another checkout intentionally makes that checkout the active `imu-bench` source. Dependency environments are keyed by file contents, so compatible checkouts share the large CUDA environment even when their paths differ.
 
-The first `data pull` asks the user to sign in to Google. It downloads the immutable snapshot referenced by `current.json`, then checks each file's SHA-256, HDF5 v3.1 structure, logical fingerprint, statistics, and bundled participant split. An experiment can pin an exact snapshot without following `current.json`:
+The first `data pull` asks the user to sign in to Google. It downloads the immutable snapshot referenced by `current.json`, then checks each file's SHA-256, HDF5 v3.2 `training_dataset` structure, logical fingerprint, statistics, and bundled participant split. An experiment can pin an exact snapshot without following `current.json`:
 
 ```bash
-imu-bench data pull --base-snapshot imu_25hz_snapshot_v2
+imu-bench data pull --base-snapshot imu_25hz_snapshot_v3
 ```
 
 Git LFS is not required. Each WSL user signs in only once: the first command must be run directly in an interactive WSL terminal. If WSL cannot open a browser and reports a `gio` error, open the displayed URL in a Windows browser and complete the login there. The URL printed after `gio:` is the same OAuth request repeated by the failed Linux browser opener, not a second login link. Non-interactive SSH or Codex automation neither copies host credentials nor continues when authentication requires input. Later pulls can run automatically after sign-in.
@@ -83,7 +83,7 @@ imu-bench --version
 
 The machine-readable contract is [`configs/contracts/imu_benchmark_contract_v2.json`](configs/contracts/imu_benchmark_contract_v2.json). Its key rules are:
 
-- HDF5 schema: `3.1.0`;
+- HDF5 schema: `3.2.0` with `artifact_profile = training_dataset`;
 - input: 25 Hz, six-axis IMU, `float32`, sensor-local coordinates, gravity retained;
 - window: 50 frames, or 2 seconds;
 - stride: 0.5 seconds in physical time, using half-up grid starts `0, 13, 25, 38, ...` at 25 Hz;
@@ -188,11 +188,11 @@ benchmark-datasets/
 imu-bench data publish-base \
   --source-dir /path/to/reviewed/imu_25hz \
   --split-dir data/splits \
-  --manifest configs/data/base_imu25_v2.json
+  --manifest configs/data/base_imu25_v3.json
 
 imu-bench data activate-base \
-  --manifest configs/data/base_imu25_v2.json \
-  --expected-current imu_25hz_snapshot_v1
+  --manifest configs/data/base_imu25_v3.json \
+  --expected-current imu_25hz_snapshot_v2
 ```
 
 Routine users only run `data pull` and do not need bucket write access. Credentials, login caches, HDF5 files, run outputs, and the local `TODO.md` must never be committed to Git.
@@ -200,7 +200,7 @@ Routine users only run `data pull` and do not need bucket write access. Credenti
 ## Immutable results and ONNX catalog
 
 Any team member on the server whitelist may publish one of the two controlled, clean
-`imu_25hz_snapshot_v2` experiment profiles through the constrained upload broker:
+`imu_25hz_snapshot_v3` experiment profiles through the constrained upload broker:
 
 - `formal_baseline_temporal_core_onnx_v1`: 65 jobs, five participant folds, complete
   validation/test parity, and PASS statistical outputs;

@@ -8,7 +8,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import warnings
 from pathlib import Path
 from typing import Any
 
@@ -26,14 +25,10 @@ from .progress import NullProgressReporter, ProgressReporter
 DEFAULT_BUCKET = "gs://soft3888-label"
 BENCHMARK_PREFIX = "benchmark-datasets"
 REMOTE_MANIFEST_SCHEMA = "imu_benchmark_dataset_manifest_v2"
-SUPPORTED_REMOTE_MANIFEST_SCHEMAS = {
-    "imu_benchmark_dataset_manifest_v1",
-    REMOTE_MANIFEST_SCHEMA,
-}
+SUPPORTED_REMOTE_MANIFEST_SCHEMAS = {REMOTE_MANIFEST_SCHEMA}
 CURRENT_SCHEMA = "imu_benchmark_current_v1"
-DATASET_HANDOFF_VERSION = "0.3.0"
-LEGACY_TEAM_HANDOFF_VERSIONS = {"0.1.0", "0.2.0"}
-BASE_MANIFEST_PATH = Path("configs/data/base_imu25_v2.json")
+DATASET_HANDOFF_VERSION = "1.0.0"
+BASE_MANIFEST_PATH = Path("configs/data/base_imu25_v3.json")
 BASE_SPLITS_PATH = Path("configs/data/base_splits_v1.json")
 
 
@@ -141,19 +136,7 @@ def _validate_current(payload: dict[str, Any], *, kind: str) -> None:
         raise ValueError(f"Current pointer kind differs: expected {kind}")
     if kind == "team":
         version = payload.get("handoff_contract_version")
-        if version is None:
-            warnings.warn(
-                "Reading a legacy unversioned team current pointer in read-only mode",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        elif version in LEGACY_TEAM_HANDOFF_VERSIONS:
-            warnings.warn(
-                f"Reading legacy team handoff {version} in read-only mode",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        elif version != DATASET_HANDOFF_VERSION:
+        if version != DATASET_HANDOFF_VERSION:
             raise ValueError("Team current pointer uses a different handoff contract")
     for name in ("snapshot_id", "manifest_object", "updated_at_utc"):
         if not isinstance(payload.get(name), str) or not payload[name]:
@@ -171,19 +154,7 @@ def _validate_remote_manifest(payload: dict[str, Any], *, expected_kind: str) ->
         raise ValueError("Remote manifest kind differs from current pointer")
     if expected_kind == "team":
         version = payload.get("handoff_contract_version")
-        if version is None:
-            warnings.warn(
-                "Reading a legacy unversioned team manifest in read-only mode",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        elif version in LEGACY_TEAM_HANDOFF_VERSIONS:
-            warnings.warn(
-                f"Reading legacy team handoff {version} in read-only mode",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        elif version != DATASET_HANDOFF_VERSION:
+        if version != DATASET_HANDOFF_VERSION:
             raise ValueError("Team manifest uses a different handoff contract")
     if payload.get("contract_version") != CONTRACT_VERSION:
         raise ValueError("Remote manifest uses a different benchmark contract")
@@ -206,7 +177,9 @@ def _validate_remote_manifest(payload: dict[str, Any], *, expected_kind: str) ->
             "sha256",
             "logical_content_sha256",
             "hdf5_schema_version",
+            "artifact_profile",
             "sampling_rate_hz",
+            "content_type",
             "evaluation_role",
             "sequences",
             "rows",
@@ -227,8 +200,26 @@ def _validate_remote_manifest(payload: dict[str, Any], *, expected_kind: str) ->
             raise ValueError("Remote manifest contains a duplicate or unsafe identity")
         ids.add(dataset_id)
         names.add(filename)
-        if item["hdf5_schema_version"] != "3.1.0":
-            raise ValueError("Remote manifest does not contain HDF5 v3.1")
+        if filename != f"{dataset_id}.h5":
+            raise ValueError("Remote manifest filename does not match dataset_id")
+        _object_uri("gs://validation", str(item["object_key"]))
+        if item["content_type"] != "application/x-hdf5":
+            raise ValueError("Remote manifest has an invalid HDF5 content type")
+        for digest_name in ("sha256", "logical_content_sha256"):
+            digest = item[digest_name]
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest)
+            ):
+                raise ValueError(f"Remote manifest has an invalid {digest_name}")
+        for count_name in ("size_bytes", "sequences", "rows", "annotations"):
+            if not isinstance(item[count_name], int) or item[count_name] < 0:
+                raise ValueError(f"Remote manifest has an invalid {count_name}")
+        if item["hdf5_schema_version"] != "3.2.0":
+            raise ValueError("Remote manifest does not contain HDF5 v3.2")
+        if item["artifact_profile"] != "training_dataset":
+            raise ValueError("Remote manifest is not a training dataset")
         if float(item["sampling_rate_hz"]) != 25.0:
             raise ValueError("Remote manifest does not contain 25 Hz data")
         if item["evaluation_role"] != expected_role:
@@ -360,6 +351,7 @@ def _validate_local_file(
         "annotations",
         "logical_content_sha256",
         "evaluation_role",
+        "artifact_profile",
     ):
         if observed[name] != entry[name]:
             raise ValueError(f"Local HDF5 {name} mismatch: {path}")

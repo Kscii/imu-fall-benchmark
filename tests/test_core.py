@@ -166,7 +166,7 @@ def test_performance_and_nvidia_telemetry_helpers() -> None:
 
 def test_versioned_base_manifest_is_cloud_safe(monkeypatch: pytest.MonkeyPatch) -> None:
     manifest = json.loads(
-        (PROJECT_ROOT / "configs/data/base_imu25_v2.json").read_text(encoding="utf-8")
+        (PROJECT_ROOT / "configs/data/base_imu25_v3.json").read_text(encoding="utf-8")
     )
     _validate_remote_manifest(manifest, expected_kind="base")
     monkeypatch.setenv("IMU_BENCH_DATA_BUCKET", "gs://team-bucket")
@@ -179,7 +179,7 @@ def test_versioned_base_manifest_is_cloud_safe(monkeypatch: pytest.MonkeyPatch) 
 def test_exact_snapshot_resolution_does_not_read_current_pointer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manifest_bytes = (PROJECT_ROOT / "configs/data/base_imu25_v2.json").read_bytes()
+    manifest_bytes = (PROJECT_ROOT / "configs/data/base_imu25_v3.json").read_bytes()
     requested = []
 
     def fake_cat(uri: str, *, optional: bool = False) -> bytes:
@@ -192,12 +192,12 @@ def test_exact_snapshot_resolution_does_not_read_current_pointer(
         kind="base",
         current_object="benchmark-datasets/base/current.json",
         optional=False,
-        snapshot_id="imu_25hz_snapshot_v2",
+        snapshot_id="imu_25hz_snapshot_v3",
     )
     assert resolved is not None
     current, manifest = resolved
-    assert manifest["snapshot_id"] == "imu_25hz_snapshot_v2"
-    assert current["manifest_object"].endswith("/base/imu_25hz_snapshot_v2/manifest.json")
+    assert manifest["snapshot_id"] == "imu_25hz_snapshot_v3"
+    assert current["manifest_object"].endswith("/base/imu_25hz_snapshot_v3/manifest.json")
     assert all(not uri.endswith("/current.json") for uri, _ in requested)
 
 
@@ -205,11 +205,11 @@ def test_exact_team_snapshot_preserves_collection_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manifest = json.loads(
-        (PROJECT_ROOT / "configs/data/base_imu25_v2.json").read_text(encoding="utf-8")
+        (PROJECT_ROOT / "configs/data/base_imu25_v3.json").read_text(encoding="utf-8")
     )
     manifest["kind"] = "team"
     manifest["snapshot_id"] = "snapshot-team-v1"
-    manifest["handoff_contract_version"] = "0.3.0"
+    manifest["handoff_contract_version"] = "1.0.0"
     for entry in manifest["files"]:
         entry["evaluation_role"] = "training_only"
     manifest_bytes = (json.dumps(manifest, sort_keys=True) + "\n").encode()
@@ -256,7 +256,7 @@ def test_reviewed_base_hdf5_integration(active_manifest_path: Path) -> None:
     if source_value is None:
         pytest.skip("IMU_BENCH_INTEGRATION_DATA_DIR is not set")
     source = Path(source_value).resolve()
-    destination = active_manifest_path.parent / "base/imu_25hz_snapshot_v2/datasets"
+    destination = active_manifest_path.parent / "base/imu_25hz_snapshot_v3/datasets"
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.symlink_to(source, target_is_directory=True)
     result = validate_data(PROJECT_ROOT, snapshot_path=active_manifest_path)
