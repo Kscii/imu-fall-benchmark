@@ -148,11 +148,34 @@ piecewise-linear interpolation of this mapping, not a constant-offset assumption
 
 ### 4.3 Frozen labels
 
-`/labels/catalog` contains the immutable code/name/status catalog required to
-interpret every activity code used by the delivery. `/labels/sequence_versions`
-contains exactly one taxonomy version assignment for each sequence. Every activity
-annotation must resolve in the assigned frozen version. Reserved exclude codes are
-resolved by this contract and are not required in the activity catalog.
+`/labels/catalog` is a one-dimensional compound dataset with fields:
+
+```text
+taxonomy_id UTF-8
+taxonomy_version UTF-8
+code UTF-8
+name UTF-8
+is_fall bool
+active bool
+```
+
+Rows are unique by `(taxonomy_id, taxonomy_version, code)`. Names and codes are
+non-empty. The catalog includes the immutable code/name/status rows required to
+interpret every activity code used by the delivery.
+
+`/labels/sequence_versions` is a one-dimensional compound dataset ordered by
+`sequence_index`:
+
+```text
+sequence_index int32
+taxonomy_id UTF-8
+taxonomy_version UTF-8
+```
+
+It contains exactly one taxonomy version assignment for each sequence and covers
+`0..S-1` once. Every non-exclude annotation code must resolve in the assigned frozen
+version. Reserved exclude codes are resolved by this contract and are not required
+in the activity catalog.
 
 ## 5. Construction and validation
 

@@ -93,7 +93,7 @@ benchmark-datasets/team/cw12eu/current.json
 
 ### 3.2 HDF5 3.2.0 约束
 
-- `/samples`：`float32 [N, 6]`，顺序为 `acceleration_x_mps2`、`acceleration_y_mps2`、`acceleration_z_mps2`、`angular_velocity_x_radps`、`angular_velocity_y_radps`、`angular_velocity_z_radps`，采样率 25 Hz，均为 SI 单位。
+- `/samples`：`float32 [N, 6]`，顺序为 `acceleration_x_mps2`、`acceleration_y_mps2`、`acceleration_z_mps2`、`angular_velocity_x_rad_s`、`angular_velocity_y_rad_s`、`angular_velocity_z_rad_s`，采样率 25 Hz，均为 SI 单位。
 - `/sequences`：包含 `sample_start`、`sample_stop`、`source_file`、`participant_id`、`recording_id`、`body_location`、`activity_code`、`is_fall`、`supervision_kind`、`source_sampling_rate_hz`。
 - `participant_id` 只能是稳定匿名标识 `cw12eu:subject-NNN`；UniKey、邮箱、姓名以及它们的可逆变体禁止进入训练 HDF5、manifest、snapshot fingerprint 或 benchmark 日志。匿名标识与 UniKey 的一对一映射只由标注服务器的私有追加式配置保存，不属于本 handoff。
 - `recording_id` 使用 `cw12eu:<UTC timestamp>`，源文件名和对象键中的录制 ID 不得包含 UniKey。
