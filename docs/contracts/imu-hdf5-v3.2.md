@@ -22,6 +22,14 @@ Both profiles require:
 - `feature_columns`, `sequence_count`, `sample_count`, `annotation_count`
 - `logical_content_sha256`, which fingerprints the logical core content only
 
+`logical_content_sha256` is the SHA-256 of the ordered sequence-local stream used
+by the benchmark writer. For each sequence, hash the length-prefixed canonical JSON
+metadata (including annotations without global `sequence_index`), then the little-
+endian `float32` sequence shape and sample bytes. Global `sample_start`,
+`sample_stop`, and `sequence_index` values are container offsets and are not part of
+the logical identity. Producers and consumers must use the shared conformance
+fixture; an aggregate hash of the three flat tables is not compatible.
+
 The whole-file SHA-256 is external: it is stored in the immutable manifest, GCS
 object metadata, and download response headers. A file never contains its own
 whole-file digest.
