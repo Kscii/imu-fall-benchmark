@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -99,6 +100,14 @@ def _sha256_file(path: Path) -> str:
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _md5_file(path: Path) -> str:
+    digest = hashlib.md5(usedforsecurity=False)
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return base64.b64encode(digest.digest()).decode("ascii")
 
 
 def _read_json_bytes(payload: bytes, *, source: str) -> dict[str, Any]:
@@ -650,12 +659,164 @@ def data_status(
     }
 
 
-def _upload_file(source: Path, uri: str, *, immutable: bool) -> None:
+def _describe_object(uri: str) -> dict[str, Any]:
+    result = _run_gcloud("storage", "objects", "describe", uri, "--format=json")
+    description = _read_json_bytes(result.stdout.encode(), source=uri)
+    if description.get("name") is None:
+        raise ValueError(f"GCS object description is incomplete: {uri}")
+    return description
+
+
+def _assert_remote_object(
+    uri: str,
+    description: dict[str, Any],
+    *,
+    size_bytes: int,
+    content_type: str,
+    metadata: dict[str, str],
+) -> None:
+    if int(description.get("size", -1)) != size_bytes:
+        raise ValueError(f"Published object size mismatch: {uri}")
+    if description.get("content_type") != content_type:
+        raise ValueError(f"Published object content type mismatch: {uri}")
+    custom_fields = description.get("custom_fields")
+    if not isinstance(custom_fields, dict) or any(
+        str(custom_fields.get(key, "")) != value for key, value in metadata.items()
+    ):
+        raise ValueError(f"Published object metadata mismatch: {uri}")
+
+
+def _assert_object_metadata(
+    source: Path,
+    uri: str,
+    description: dict[str, Any],
+    *,
+    content_type: str,
+    metadata: dict[str, str],
+) -> None:
+    _assert_remote_object(
+        uri,
+        description,
+        size_bytes=source.stat().st_size,
+        content_type=content_type,
+        metadata=metadata,
+    )
+
+
+def _upload_file(
+    source: Path,
+    uri: str,
+    *,
+    immutable: bool,
+    content_type: str,
+    metadata: dict[str, str],
+) -> None:
     arguments = ["storage", "cp"]
     if immutable:
         arguments.append("--no-clobber")
+    arguments.append(f"--content-type={content_type}")
+    if metadata:
+        arguments.append(
+            "--custom-metadata="
+            + ",".join(f"{key}={value}" for key, value in sorted(metadata.items()))
+        )
     arguments.extend((str(source), uri))
     _run_gcloud(*arguments)
+    description = _describe_object(uri)
+    try:
+        _assert_object_metadata(
+            source,
+            uri,
+            description,
+            content_type=content_type,
+            metadata=metadata,
+        )
+        return
+    except ValueError:
+        if not immutable or description.get("md5_hash") != _md5_file(source):
+            raise
+    metageneration_value = description.get("metageneration")
+    try:
+        metageneration = int(metageneration_value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"Cannot safely repair object metadata without metageneration: {uri}"
+        ) from error
+    update_arguments = [
+        "storage",
+        "objects",
+        "update",
+        uri,
+        f"--content-type={content_type}",
+        f"--if-metageneration-match={metageneration}",
+    ]
+    if metadata:
+        update_arguments.append(
+            "--custom-metadata="
+            + ",".join(f"{key}={value}" for key, value in sorted(metadata.items()))
+        )
+    _run_gcloud(*update_arguments)
+    _assert_object_metadata(
+        source,
+        uri,
+        _describe_object(uri),
+        content_type=content_type,
+        metadata=metadata,
+    )
+
+
+def _dataset_object_metadata(manifest: dict[str, Any], entry: dict[str, Any]) -> dict[str, str]:
+    return {
+        "artifact_profile": str(entry["artifact_profile"]),
+        "evaluation_role": str(entry["evaluation_role"]),
+        "hdf5_schema_version": str(entry["hdf5_schema_version"]),
+        "logical_content_sha256": str(entry["logical_content_sha256"]),
+        "sampling_rate_hz": str(int(float(entry["sampling_rate_hz"]))),
+        "sha256": str(entry["sha256"]),
+        "snapshot_id": str(manifest["snapshot_id"]),
+    }
+
+
+def _verify_published_snapshot(
+    bucket: str,
+    manifest: dict[str, Any],
+    manifest_bytes: bytes,
+) -> None:
+    for entry in manifest["files"]:
+        uri = _object_uri(bucket, str(entry["object_key"]))
+        _assert_remote_object(
+            uri,
+            _describe_object(uri),
+            size_bytes=int(entry["size_bytes"]),
+            content_type="application/x-hdf5",
+            metadata=_dataset_object_metadata(manifest, entry),
+        )
+    for entry in manifest.get("splits", []):
+        uri = _object_uri(bucket, str(entry["object_key"]))
+        _assert_remote_object(
+            uri,
+            _describe_object(uri),
+            size_bytes=int(entry["size_bytes"]),
+            content_type="text/csv",
+            metadata={
+                "sha256": str(entry["sha256"]),
+                "snapshot_id": str(manifest["snapshot_id"]),
+                "version": str(entry["version"]),
+            },
+        )
+    manifest_object = f"{BENCHMARK_PREFIX}/base/{manifest['snapshot_id']}/manifest.json"
+    uri = _object_uri(bucket, manifest_object)
+    _assert_remote_object(
+        uri,
+        _describe_object(uri),
+        size_bytes=len(manifest_bytes),
+        content_type="application/json",
+        metadata={
+            "sha256": _sha256_bytes(manifest_bytes),
+            "schema_version": str(manifest["schema_version"]),
+            "snapshot_id": str(manifest["snapshot_id"]),
+        },
+    )
 
 
 def publish_base(
@@ -688,6 +849,8 @@ def publish_base(
                 source,
                 _object_uri(bucket, str(entry["object_key"])),
                 immutable=True,
+                content_type="application/x-hdf5",
+                metadata=_dataset_object_metadata(manifest, entry),
             )
             task.update(advance=1)
     split_entries = manifest.get("splits", [])
@@ -704,6 +867,12 @@ def publish_base(
                 source,
                 _object_uri(bucket, str(entry["object_key"])),
                 immutable=True,
+                content_type="text/csv",
+                metadata={
+                    "sha256": str(entry["sha256"]),
+                    "snapshot_id": str(manifest["snapshot_id"]),
+                    "version": str(entry["version"]),
+                },
             )
             task.update(advance=1)
     manifest_object = f"{BENCHMARK_PREFIX}/base/{manifest['snapshot_id']}/manifest.json"
@@ -711,6 +880,12 @@ def publish_base(
         manifest_path,
         _object_uri(bucket, manifest_object),
         immutable=True,
+        content_type="application/json",
+        metadata={
+            "sha256": _sha256_bytes(manifest_bytes),
+            "schema_version": str(manifest["schema_version"]),
+            "snapshot_id": str(manifest["snapshot_id"]),
+        },
     )
     remote_manifest_bytes = _gcloud_cat(
         _object_uri(bucket, manifest_object),
@@ -720,6 +895,7 @@ def publish_base(
     manifest_sha256 = _sha256_bytes(manifest_bytes)
     if _sha256_bytes(remote_manifest_bytes) != manifest_sha256:
         raise ValueError("Published base manifest SHA-256 mismatch")
+    _verify_published_snapshot(bucket, manifest, manifest_bytes)
     return {
         "status": "PASS",
         "account": account,
@@ -755,6 +931,7 @@ def activate_base(
         assert remote_manifest_bytes is not None
         if remote_manifest_bytes != manifest_bytes:
             raise ValueError("Staged base manifest does not match the reviewed local file")
+        _verify_published_snapshot(bucket, manifest, manifest_bytes)
     current = {
         "schema_version": CURRENT_SCHEMA,
         "kind": "base",
@@ -788,6 +965,12 @@ def activate_base(
             current_path,
             _object_uri(bucket, current_object),
             immutable=False,
+            content_type="application/json",
+            metadata={
+                "sha256": _sha256_file(current_path),
+                "schema_version": CURRENT_SCHEMA,
+                "snapshot_id": str(manifest["snapshot_id"]),
+            },
         )
     finally:
         current_path.unlink(missing_ok=True)
